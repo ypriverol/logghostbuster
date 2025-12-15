@@ -33,7 +33,7 @@ def haversine_distance(lat1: float, lon1: float, lat2: float, lon2: float) -> fl
     return c * r
 
 
-def parse_geo_location(geo_loc_str: str) -> Tuple[Optional[float], Optional[float]]:
+def parse_geo_location(geo_loc_str: Optional[str]) -> Tuple[Optional[float], Optional[float]]:
     """
     Parse 'lat,lon' string to (lat, lon) tuple.
     
