@@ -36,7 +36,7 @@ class ReportGenerator:
             'max_users_per_hour': 'Peak user density',
             'user_cv': 'Coefficient of variation (pattern regularity)',
             'users_per_active_hour': 'User concentration',
-            'projects_per_user': 'Download diversity (project/resource variety per user)',
+            'projects_per_user': 'Download diversity',
             'hourly_download_std': 'Standard deviation of downloads across hours',
             'peak_hour_concentration': 'Fraction of downloads in busiest hour',
             'working_hours_ratio': 'Fraction of downloads during working hours',
