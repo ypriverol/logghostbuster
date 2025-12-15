@@ -2,7 +2,7 @@
 
 import pandas as pd
 
-from .utils import logger
+from ..utils import logger
 
 
 def classify_locations(df):
