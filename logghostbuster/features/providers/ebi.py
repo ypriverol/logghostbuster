@@ -1,13 +1,34 @@
 """
-EBI-specific feature extractors.
+EBI-specific feature extractors and convenience functions.
 
-This module contains feature extractors specific to EBI log formats.
-Currently, EBI logs work with standard extractors, but this module can
-be extended with EBI-specific features if needed.
+This module contains feature extractors and convenience functions specific to EBI log formats.
 """
 
 from ..base import BaseFeatureExtractor
+from .ebi_extraction import extract_location_features
+from .ebi_extractors import (
+    YearlyPatternExtractor,
+    TimeOfDayExtractor,
+    CountryLevelExtractor,
+)
+from ..schema import EBI_SCHEMA
 import pandas as pd
+
+
+def extract_location_features_ebi(conn, input_parquet):
+    """
+    Convenience function for EBI log format (backward compatibility).
+    
+    This uses EBI-specific extraction logic with EBI schema and EBI-tailored extractors.
+    
+    Args:
+        conn: Database connection (DuckDB)
+        input_parquet: Path to input parquet file
+    
+    Returns:
+        DataFrame with extracted features using EBI schema and EBI extractors
+    """
+    return extract_location_features(conn, input_parquet, schema=EBI_SCHEMA)
 
 
 # Example: EBI-specific extractor (if needed in the future)

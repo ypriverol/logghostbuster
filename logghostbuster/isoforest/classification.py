@@ -1,6 +1,12 @@
 """Classification logic for bot and download hub detection."""
 
 import pandas as pd
+import numpy as np
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.cluster import KMeans
+from sklearn.preprocessing import StandardScaler
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import classification_report, confusion_matrix
 
 from ..utils import logger
 
@@ -394,6 +400,277 @@ def classify_locations(df):
     
     df['is_bot'] = bot_mask
     df['is_download_hub'] = hub_mask
+    
+    return df
+
+
+def classify_locations_ml(df, feature_columns, use_rule_based_labels=True, test_size=0.2, random_state=42):
+    """
+    Classify locations using ML-based approach (RandomForestClassifier).
+    
+    This function trains a multi-class classifier to distinguish between:
+    - bot (class 0)
+    - download_hub (class 1) 
+    - normal (class 2)
+    
+    Args:
+        df: DataFrame with features and anomaly scores
+        feature_columns: List of feature column names to use for classification
+        use_rule_based_labels: If True, uses rule-based classification to generate training labels.
+                               If False, expects 'is_bot' and 'is_download_hub' columns already present.
+        test_size: Fraction of data to use for testing (for evaluation metrics)
+        random_state: Random seed for reproducibility
+    
+    Returns:
+        DataFrame with 'is_bot' and 'is_download_hub' columns added
+    """
+    logger.info("Training ML-based classifier...")
+    
+    # Prepare features
+    X = df[feature_columns].fillna(0).values
+    
+    # Generate labels using rule-based classification if needed
+    if use_rule_based_labels:
+        logger.info("  Generating training labels using rule-based classification...")
+        df_labeled = classify_locations(df.copy())
+        # Create multi-class labels: 0=bot, 1=hub, 2=normal
+        y = np.where(df_labeled['is_bot'], 0,
+                    np.where(df_labeled['is_download_hub'], 1, 2))
+    else:
+        # Use existing labels
+        if 'is_bot' not in df.columns or 'is_download_hub' not in df.columns:
+            raise ValueError("If use_rule_based_labels=False, 'is_bot' and 'is_download_hub' columns must exist")
+        y = np.where(df['is_bot'], 0,
+                    np.where(df['is_download_hub'], 1, 2))
+    
+    # Check class distribution
+    unique, counts = np.unique(y, return_counts=True)
+    class_names = ['bot', 'hub', 'normal']
+    logger.info("  Class distribution:")
+    for cls, count in zip(unique, counts):
+        logger.info(f"    {class_names[cls]}: {count:,} ({count/len(y)*100:.1f}%)")
+    
+    # Scale features
+    scaler = StandardScaler()
+    X_scaled = scaler.fit_transform(X)
+    
+    # Split data for evaluation (optional, but useful for metrics)
+    # Check if stratified split is possible (each class needs at least 2 members)
+    unique, counts = np.unique(y, return_counts=True)
+    can_stratify = all(count >= 2 for count in counts)
+    min_samples_per_class = min(counts)
+    
+    # Skip test split if dataset is too small or stratification not possible
+    if test_size > 0 and can_stratify and len(y) > 20:
+        X_train, X_test, y_train, y_test = train_test_split(
+            X_scaled, y, test_size=test_size, random_state=random_state, stratify=y
+        )
+    else:
+        if test_size > 0:
+            if not can_stratify:
+                logger.info(f"  Skipping test split: some classes have <2 members (min: {min_samples_per_class})")
+            else:
+                logger.info(f"  Skipping test split: dataset too small ({len(y)} samples)")
+        X_train, y_train = X_scaled, y
+        X_test, y_test = None, None
+    
+    # Train RandomForestClassifier
+    logger.info("  Training RandomForestClassifier...")
+    clf = RandomForestClassifier(
+        n_estimators=300,
+        max_depth=20,
+        min_samples_split=5,
+        min_samples_leaf=2,
+        class_weight='balanced',  # Handle class imbalance
+        random_state=random_state,
+        n_jobs=-1,
+        verbose=0
+    )
+    
+    clf.fit(X_train, y_train)
+    
+    # Evaluate on test set if available
+    if X_test is not None:
+        y_pred_test = clf.predict(X_test)
+        logger.info("\n  Test Set Performance:")
+        logger.info(f"  {classification_report(y_test, y_pred_test, target_names=class_names)}")
+        
+        logger.info("  Confusion Matrix:")
+        cm = confusion_matrix(y_test, y_pred_test)
+        logger.info(f"  {cm}")
+    
+    # Predict on all data
+    logger.info("  Predicting on all locations...")
+    y_pred = clf.predict(X_scaled)
+    
+    # Log feature importances
+    feature_importances = pd.Series(clf.feature_importances_, index=feature_columns).sort_values(ascending=False)
+    logger.info("\n  Top 10 Most Important Features:")
+    for feat, importance in feature_importances.head(10).items():
+        logger.info(f"    {feat}: {importance:.4f}")
+    
+    # Add predictions to dataframe
+    df['is_bot'] = (y_pred == 0)
+    df['is_download_hub'] = (y_pred == 1)
+    
+    # Log final distribution
+    n_bots = df['is_bot'].sum()
+    n_hubs = df['is_download_hub'].sum()
+    n_normal = len(df) - n_bots - n_hubs
+    logger.info(f"\n  Final Classification:")
+    logger.info(f"    Bot locations: {n_bots:,} ({n_bots/len(df)*100:.1f}%)")
+    logger.info(f"    Hub locations: {n_hubs:,} ({n_hubs/len(df)*100:.1f}%)")
+    logger.info(f"    Normal locations: {n_normal:,} ({n_normal/len(df)*100:.1f}%)")
+    
+    return df
+
+
+def classify_locations_ml_unsupervised(df, feature_columns, n_clusters=3, random_state=42):
+    """
+    Classify locations using unsupervised ML approach (KMeans clustering).
+    
+    This function uses KMeans clustering with improved feature selection and mapping logic.
+    Uses anomaly scores and key behavioral features to better identify bot/hub/normal patterns.
+    
+    Args:
+        df: DataFrame with features and anomaly scores
+        feature_columns: List of feature column names to use for classification
+        n_clusters: Number of clusters (default: 3 for bot, hub, normal)
+        random_state: Random seed for reproducibility
+    
+    Returns:
+        DataFrame with 'is_bot' and 'is_download_hub' columns added
+    """
+    logger.info("Training unsupervised ML-based classifier (KMeans with improved mapping)...")
+    
+    # Select most discriminative features for clustering
+    # Focus on features that best distinguish bots vs hubs vs normal
+    key_features = [
+        'unique_users',
+        'downloads_per_user', 
+        'anomaly_score',  # Use anomaly score as a feature
+        'fraction_latest_year',
+        'spike_ratio',
+        'hourly_entropy',
+        'working_hours_ratio',
+        'users_per_active_hour'
+    ]
+    
+    # Use only features that exist in the dataframe
+    available_key_features = [f for f in key_features if f in df.columns]
+    if 'anomaly_score' not in df.columns:
+        logger.warning("  anomaly_score not found, using 0 as default")
+        df['anomaly_score'] = 0
+    
+    logger.info(f"  Using {len(available_key_features)} key features for clustering: {available_key_features}")
+    
+    # Prepare features
+    X = df[available_key_features].fillna(0).values
+    
+    # Scale features
+    scaler = StandardScaler()
+    X_scaled = scaler.fit_transform(X)
+    
+    # Apply KMeans clustering
+    logger.info(f"  Clustering into {n_clusters} groups using KMeans...")
+    kmeans = KMeans(
+        n_clusters=n_clusters,
+        random_state=random_state,
+        n_init=20,  # More initializations for better results
+        max_iter=500
+    )
+    cluster_labels = kmeans.fit_predict(X_scaled)
+    
+    # Analyze cluster characteristics to map to bot/hub/normal
+    logger.info("  Analyzing cluster characteristics...")
+    df_clustered = df.copy()
+    df_clustered['cluster'] = cluster_labels
+    
+    # Calculate cluster centroids/means for key features
+    cluster_stats = []
+    for cluster_id in range(n_clusters):
+        cluster_data = df_clustered[df_clustered['cluster'] == cluster_id]
+        stats = {
+            'cluster': cluster_id,
+            'size': len(cluster_data),
+            'avg_unique_users': cluster_data['unique_users'].mean(),
+            'avg_downloads_per_user': cluster_data['downloads_per_user'].mean(),
+            'avg_total_downloads': cluster_data['total_downloads'].mean(),
+            'avg_anomaly_score': cluster_data['anomaly_score'].mean(),
+            'avg_fraction_latest_year': cluster_data.get('fraction_latest_year', pd.Series([0] * len(cluster_data))).mean(),
+            'avg_spike_ratio': cluster_data.get('spike_ratio', pd.Series([0] * len(cluster_data))).mean(),
+            'median_downloads_per_user': cluster_data['downloads_per_user'].median(),
+            'p75_downloads_per_user': cluster_data['downloads_per_user'].quantile(0.75),
+        }
+        cluster_stats.append(stats)
+        logger.info(f"    Cluster {cluster_id}: {stats['size']} locations")
+        logger.info(f"      Avg users: {stats['avg_unique_users']:.0f}, "
+                   f"Avg DL/user: {stats['avg_downloads_per_user']:.1f}, "
+                   f"Median DL/user: {stats['median_downloads_per_user']:.1f}, "
+                   f"Avg anomaly: {stats['avg_anomaly_score']:.3f}")
+    
+    cluster_df = pd.DataFrame(cluster_stats)
+    
+    # Improved mapping strategy:
+    # 1. Hub: High downloads_per_user (use median to avoid outliers)
+    # 2. Bot: High users + low DL/user + high anomaly score + high spike ratio
+    # 3. Normal: Everything else
+    
+    # Identify hub cluster (highest median downloads_per_user, or high avg if median is close)
+    # Prefer clusters with median > 100 or avg > 500
+    cluster_df['hub_score'] = (
+        cluster_df['median_downloads_per_user'] / (cluster_df['median_downloads_per_user'].max() + 1e-10) * 0.6 +
+        cluster_df['avg_downloads_per_user'] / (cluster_df['avg_downloads_per_user'].max() + 1e-10) * 0.4
+    )
+    hub_cluster = cluster_df.loc[cluster_df['hub_score'].idxmax(), 'cluster']
+    hub_median_dl = cluster_df.loc[cluster_df['hub_score'].idxmax(), 'median_downloads_per_user']
+    hub_avg_dl = cluster_df.loc[cluster_df['hub_score'].idxmax(), 'avg_downloads_per_user']
+    logger.info(f"  Identified Cluster {hub_cluster} as DOWNLOAD_HUB (median DL/user: {hub_median_dl:.1f}, avg DL/user: {hub_avg_dl:.1f})")
+    
+    # Identify bot cluster from remaining clusters
+    # Bot characteristics: high users, low DL/user, high anomaly, high spike ratio
+    remaining_clusters = cluster_df[cluster_df['cluster'] != hub_cluster].copy()
+    if len(remaining_clusters) > 0:
+        # Normalize features for scoring
+        max_users = remaining_clusters['avg_unique_users'].max()
+        max_dl_user = remaining_clusters['avg_downloads_per_user'].max()
+        max_anomaly = remaining_clusters['avg_anomaly_score'].max() + 1e-10
+        max_spike = remaining_clusters['avg_spike_ratio'].max() + 1e-10
+        
+        # Bot score: high users + low DL/user + high anomaly + high spike
+        remaining_clusters['bot_score'] = (
+            (remaining_clusters['avg_unique_users'] / max_users) * 0.3 +
+            (1 - remaining_clusters['avg_downloads_per_user'] / max_dl_user) * 0.3 +
+            (remaining_clusters['avg_anomaly_score'] / max_anomaly) * 0.25 +
+            (remaining_clusters['avg_spike_ratio'] / max_spike) * 0.15
+        )
+        
+        bot_cluster = remaining_clusters.loc[remaining_clusters['bot_score'].idxmax(), 'cluster']
+        bot_stats = remaining_clusters.loc[remaining_clusters['bot_score'].idxmax()]
+        logger.info(f"  Identified Cluster {bot_cluster} as BOT")
+        logger.info(f"    Avg users: {bot_stats['avg_unique_users']:.0f}, "
+                   f"Avg DL/user: {bot_stats['avg_downloads_per_user']:.1f}, "
+                   f"Avg anomaly: {bot_stats['avg_anomaly_score']:.3f}, "
+                   f"Avg spike: {bot_stats['avg_spike_ratio']:.2f}")
+    else:
+        bot_cluster = None
+        logger.info("  Only one cluster found, cannot identify bot cluster")
+    
+    # Assign labels
+    df['is_download_hub'] = (cluster_labels == hub_cluster)
+    if bot_cluster is not None:
+        df['is_bot'] = (cluster_labels == bot_cluster)
+    else:
+        df['is_bot'] = False
+    
+    # Log final distribution
+    n_bots = df['is_bot'].sum()
+    n_hubs = df['is_download_hub'].sum()
+    n_normal = len(df) - n_bots - n_hubs
+    logger.info(f"\n  Final Classification:")
+    logger.info(f"    Bot locations: {n_bots:,} ({n_bots/len(df)*100:.1f}%)")
+    logger.info(f"    Hub locations: {n_hubs:,} ({n_hubs/len(df)*100:.1f}%)")
+    logger.info(f"    Normal locations: {n_normal:,} ({n_normal/len(df)*100:.1f}%)")
     
     return df
 

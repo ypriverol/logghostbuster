@@ -73,19 +73,29 @@ class ReportGenerator:
             f.write(f"  - {feature}: {desc}\n")
         f.write("\n")
     
-    def _write_classification_rules(self, f):
-        """Write classification rules to report (generic version)."""
-        f.write("Classification rules:\n")
-        f.write("  BOT (multiple patterns, aggressive thresholds):\n")
-        f.write("    Detected based on anomaly scores and behavioral patterns:\n")
-        f.write("    - Low downloads per user combined with high user counts\n")
-        f.write("    - Suspicious temporal patterns (recent spikes, new locations)\n")
-        f.write("    - Irregular activity patterns\n")
-        f.write("  DOWNLOAD_HUB:\n")
-        f.write("    Detected based on:\n")
-        f.write("    - Very high downloads per user (mirrors/single-user hubs)\n")
-        f.write("    - Large total downloads with moderate downloads per user\n")
-        f.write("    - Regular working hours patterns (research institutions)\n\n")
+    def _write_classification_rules(self, f, classification_method='rules'):
+        """Write classification method description to report."""
+        if classification_method.lower() == 'ml':
+            f.write("Classification method: ML-based (RandomForestClassifier)\n")
+            f.write("  The classifier was trained on rule-based labels and uses the following features:\n")
+            f.write("  - Behavioral patterns (user counts, downloads per user, temporal patterns)\n")
+            f.write("  - Anomaly scores from Isolation Forest\n")
+            f.write("  - Temporal features (yearly patterns, time-of-day patterns)\n")
+            f.write("  - Geographic features (country-level patterns)\n")
+            f.write("  Classes: BOT (0), DOWNLOAD_HUB (1), NORMAL (2)\n\n")
+        else:
+            f.write("Classification method: Rule-based\n")
+            f.write("Classification rules:\n")
+            f.write("  BOT (multiple patterns, aggressive thresholds):\n")
+            f.write("    Detected based on anomaly scores and behavioral patterns:\n")
+            f.write("    - Low downloads per user combined with high user counts\n")
+            f.write("    - Suspicious temporal patterns (recent spikes, new locations)\n")
+            f.write("    - Irregular activity patterns\n")
+            f.write("  DOWNLOAD_HUB:\n")
+            f.write("    Detected based on:\n")
+            f.write("    - Very high downloads per user (mirrors/single-user hubs)\n")
+            f.write("    - Large total downloads with moderate downloads per user\n")
+            f.write("    - Regular working hours patterns (research institutions)\n\n")
     
     def _write_summary_stats(self, f, df: pd.DataFrame, bot_locs: pd.DataFrame, 
                             hub_locs: pd.DataFrame, stats: Dict[str, Any]):
@@ -270,7 +280,8 @@ class ReportGenerator:
                    f"{row['downloads_per_user']:>10.1f}\n")
     
     def generate(self, df: pd.DataFrame, bot_locs: pd.DataFrame, hub_locs: pd.DataFrame, 
-                stats: Dict[str, Any], output_dir: str, available_features: Optional[List[str]] = None) -> str:
+                stats: Dict[str, Any], output_dir: str, available_features: Optional[List[str]] = None,
+                classification_method: str = 'rules') -> str:
         """
         Generate comprehensive report.
         
@@ -307,7 +318,7 @@ class ReportGenerator:
             f.write("-" * 60 + "\n")
             f.write("Algorithm: Isolation Forest (unsupervised anomaly detection)\n\n")
             self._write_feature_list(f, available_features)
-            self._write_classification_rules(f)
+            self._write_classification_rules(f, classification_method)
             
             self._write_summary_stats(f, df, bot_locs, hub_locs, stats)
             self._write_city_level_aggregation(f, df, city_field)
@@ -321,11 +332,12 @@ class ReportGenerator:
 def generate_report(df: pd.DataFrame, bot_locs: pd.DataFrame, hub_locs: pd.DataFrame, 
                    stats: Dict[str, Any], output_dir: str, 
                    schema: Optional[LogSchema] = None,
-                   available_features: Optional[List[str]] = None) -> str:
+                   available_features: Optional[List[str]] = None,
+                   classification_method: str = 'rules') -> str:
     """
     Convenience function for generating reports (backward compatibility).
     
     This creates a ReportGenerator and calls generate().
     """
     generator = ReportGenerator(schema=schema)
-    return generator.generate(df, bot_locs, hub_locs, stats, output_dir, available_features)
+    return generator.generate(df, bot_locs, hub_locs, stats, output_dir, available_features, classification_method)

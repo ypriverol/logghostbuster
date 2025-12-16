@@ -1,11 +1,15 @@
-"""Standard feature extractors that work with any log format."""
+"""EBI-specific feature extractors.
+
+These extractors are designed for EBI log formats and extract features
+tailored to EBI's data structure (yearly patterns, time-of-day patterns, country-level aggregations).
+"""
 
 import pandas as pd
 import numpy as np
 from scipy import stats
 
-from .base import BaseFeatureExtractor
-from ..utils import logger
+from ..base import BaseFeatureExtractor
+from ...utils import logger
 
 
 class YearlyPatternExtractor(BaseFeatureExtractor):

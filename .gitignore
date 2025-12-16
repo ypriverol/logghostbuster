@@ -212,3 +212,5 @@ __marimo__/
 
 # Output directory
 output/
+.codacy/
+.cursor/

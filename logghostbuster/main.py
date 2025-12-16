@@ -4,15 +4,71 @@ import os
 import argparse
 import pandas as pd
 import duckdb
+import tempfile
 
 from .utils import logger, format_number
-from .features import extract_location_features
-from .isoforest import train_isolation_forest, compute_feature_importances, classify_locations
+from .features.providers.ebi import extract_location_features
+from .isoforest import train_isolation_forest, compute_feature_importances, classify_locations, classify_locations_ml, classify_locations_ml_unsupervised
 from .reports import annotate_downloads
 from .reports import generate_report
 from .features.schema import LogSchema, EBI_SCHEMA
 from .features.base import BaseFeatureExtractor
 from typing import Optional, List
+
+
+def sample_parquet_records(conn, input_parquet: str, sample_size: int, schema: Optional[LogSchema] = None) -> str:
+    """
+    Randomly sample N records from a parquet file across all years.
+    
+    Args:
+        conn: DuckDB connection
+        input_parquet: Path to input parquet file
+        sample_size: Number of records to sample
+        schema: LogSchema for field mappings (optional)
+    
+    Returns:
+        Path to temporary parquet file with sampled records
+    """
+    if schema is None:
+        schema = EBI_SCHEMA
+    
+    logger.info(f"Sampling {sample_size:,} records randomly from all years...")
+    
+    escaped_path = os.path.abspath(input_parquet).replace("'", "''")
+    
+    # First, get total count
+    count_result = conn.execute(f"SELECT COUNT(*) as total FROM read_parquet('{escaped_path}')").df()
+    total_records = count_result.iloc[0]['total']
+    
+    logger.info(f"Total records in file: {total_records:,}")
+    
+    if sample_size >= total_records:
+        logger.info(f"Sample size ({sample_size:,}) >= total records ({total_records:,}), using original file")
+        return input_parquet
+    
+    # Create temporary file for sampled data
+    temp_fd, temp_path = tempfile.mkstemp(suffix='.parquet', prefix='logghostbuster_sample_')
+    os.close(temp_fd)
+    
+    # Sample records randomly using DuckDB
+    escaped_temp = os.path.abspath(temp_path).replace("'", "''")
+    
+    sample_query = f"""
+    COPY (
+        SELECT * FROM read_parquet('{escaped_path}')
+        ORDER BY RANDOM()
+        LIMIT {sample_size}
+    ) TO '{escaped_temp}' (FORMAT PARQUET)
+    """
+    
+    conn.execute(sample_query)
+    
+    # Verify sample size
+    sample_count = conn.execute(f"SELECT COUNT(*) as total FROM read_parquet('{escaped_temp}')").df()
+    actual_sample = sample_count.iloc[0]['total']
+    logger.info(f"Sampled {actual_sample:,} records to temporary file: {temp_path}")
+    
+    return temp_path
 
 
 def run_bot_annotator(
@@ -22,7 +78,9 @@ def run_bot_annotator(
     contamination=0.15,
     compute_importances=False,
     schema: Optional[LogSchema] = None,
-    custom_extractors: Optional[List[BaseFeatureExtractor]] = None
+    custom_extractors: Optional[List[BaseFeatureExtractor]] = None,
+    sample_size: Optional[int] = None,
+    classification_method: str = 'rules'
 ):
     """
     Main function to detect bots and download hubs, and annotate the parquet file.
@@ -35,6 +93,8 @@ def run_bot_annotator(
         compute_importances: Whether to compute feature importances (optional, slower)
         schema: LogSchema defining field mappings (defaults to EBI_SCHEMA for backward compatibility)
         custom_extractors: Optional list of custom feature extractors to apply
+        sample_size: Optional number of records to randomly sample from all years (default: None, uses all data)
+        classification_method: Classification method to use - 'rules' for rule-based (default) or 'ml' for ML-based
     
     Returns:
         Dictionary with detection results and statistics
@@ -45,6 +105,9 @@ def run_bot_annotator(
     logger.info(f"Input: {input_parquet}")
     logger.info(f"Output directory: {output_dir}")
     logger.info(f"Contamination: {contamination}")
+    logger.info(f"Classification method: {classification_method}")
+    if sample_size:
+        logger.info(f"Sample size: {sample_size:,} records")
     
     os.makedirs(output_dir, exist_ok=True)
     
@@ -53,14 +116,25 @@ def run_bot_annotator(
     conn.execute("SET memory_limit='2GB'")
     conn.execute("SET preserve_insertion_order=false")
     
+    # Handle sampling if requested
+    sampled_file = None
+    actual_input_parquet = input_parquet
+    
     try:
+        if sample_size:
+            sampled_file = sample_parquet_records(conn, input_parquet, sample_size, schema)
+            actual_input_parquet = sampled_file
+        
         # Step 1: Extract features
         logger.info("\n" + "=" * 70)
         logger.info("Step 1: Extracting location features")
         logger.info("=" * 70)
+        # Use EBI-specific extraction (default behavior)
+        # For other providers, they should implement their own extraction functions
+        # and pass them via custom_extractors, or use a different schema with custom extractors
         location_df = extract_location_features(
             conn, 
-            input_parquet,
+            actual_input_parquet,
             schema=schema if schema is not None else EBI_SCHEMA,
             custom_extractors=custom_extractors
         )
@@ -123,7 +197,18 @@ def run_bot_annotator(
         logger.info("\n" + "=" * 70)
         logger.info("Step 3: Classifying locations")
         logger.info("=" * 70)
-        analysis_df = classify_locations(analysis_df)
+        
+        if classification_method.lower() == 'ml':
+            logger.info("Using supervised ML-based classification...")
+            analysis_df = classify_locations_ml(analysis_df, feature_columns)
+        elif classification_method.lower() == 'ml-unsupervised':
+            logger.info("Using unsupervised ML-based classification...")
+            analysis_df = classify_locations_ml_unsupervised(analysis_df, feature_columns)
+        elif classification_method.lower() == 'rules':
+            logger.info("Using rule-based classification...")
+            analysis_df = classify_locations(analysis_df)
+        else:
+            raise ValueError(f"Unknown classification method: {classification_method}. Must be 'rules', 'ml', or 'ml-unsupervised'")
         
         bot_locs = analysis_df[analysis_df['is_bot']].copy()
         hub_locs = analysis_df[analysis_df['is_download_hub']].copy()
@@ -154,7 +239,7 @@ def run_bot_annotator(
         if output_parquet is None:
             output_parquet = input_parquet
         
-        annotate_downloads(conn, input_parquet, output_parquet, 
+        annotate_downloads(conn, actual_input_parquet, output_parquet, 
                           bot_locs, hub_locs, output_dir)
         
         # Step 5: Calculate statistics
@@ -197,7 +282,8 @@ def run_bot_annotator(
         # Generate report
         generate_report(analysis_df, bot_locs, hub_locs, stats, output_dir, 
                        schema=schema if schema is not None else EBI_SCHEMA,
-                       available_features=feature_columns)
+                       available_features=feature_columns,
+                       classification_method=classification_method)
         
         logger.info("\n" + "=" * 70)
         logger.info("Bot Annotation Complete!")
@@ -218,6 +304,10 @@ def run_bot_annotator(
         logger.error(f"Error: {e}", exc_info=True)
         raise
     finally:
+        # Clean up temporary sampled file if created
+        if sampled_file and sampled_file != input_parquet and os.path.exists(sampled_file):
+            logger.info(f"Cleaning up temporary sampled file: {sampled_file}")
+            os.remove(sampled_file)
         conn.close()
 
 
@@ -239,6 +329,11 @@ def main():
                        help='Expected proportion of anomalies (default: 0.15)')
     parser.add_argument('--compute-importances', action='store_true',
                        help='Compute feature importances (optional, slower)')
+    parser.add_argument('--sample-size', '-s', type=int, default=None,
+                       help='Randomly sample N records from all years before processing (e.g., 1000000 for 1M records)')
+    parser.add_argument('--classification-method', '-m', type=str, default='rules',
+                       choices=['rules', 'ml', 'ml-unsupervised'],
+                       help='Classification method: "rules" for rule-based (default), "ml" for supervised ML-based, or "ml-unsupervised" for unsupervised ML-based')
     
     args = parser.parse_args()
     
@@ -248,7 +343,9 @@ def main():
             args.output,
             args.output_dir,
             args.contamination,
-            compute_importances=args.compute_importances
+            compute_importances=args.compute_importances,
+            sample_size=args.sample_size,
+            classification_method=args.classification_method
         )
         
         logger.info("\nDone!")

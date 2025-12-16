@@ -21,7 +21,9 @@ The system follows a multi-stage pipeline:
    - Locations with unusual behavioral patterns (short path lengths in the isolation tree) are flagged as anomalies
    - The contamination parameter controls the expected proportion of anomalies (default: 15%)
 
-3. **Classification**: Classifies anomalies into categories using rule-based patterns:
+3. **Classification**: Classifies anomalies into categories using either rule-based or ML-based methods:
+   
+   **Rule-based classification** (default): Uses a comprehensive set of pattern-based rules:
    - **BOT**: Detected when anomalies exhibit bot-like characteristics:
      - Low downloads per user (< 100) combined with high user counts (> 5K-30K users)
      - Sudden spikes in activity (high spike ratios and latest year concentration)
@@ -31,6 +33,20 @@ The system follows a multi-stage pipeline:
    - **DOWNLOAD_HUB**: Detected when anomalies show hub-like characteristics:
      - Very high downloads per user (> 500) - mirrors/single-user hubs
      - High total downloads (> 150K) with moderate downloads per user (50-500) and regular working hours patterns - research institutions
+   
+   **Supervised ML-based classification** (optional): Uses a RandomForestClassifier trained on rule-based labels:
+   - First generates training labels using rule-based classification
+   - Trains a multi-class classifier (BOT, DOWNLOAD_HUB, NORMAL) on behavioral features
+   - Can generalize better to edge cases and learn complex feature interactions
+   - Provides feature importance rankings for interpretability
+   - Use `--classification-method ml` to enable
+   
+   **Unsupervised ML-based classification** (optional): Uses KMeans clustering:
+   - Clusters locations into 3 groups based on behavioral features
+   - Maps clusters to bot/hub/normal based on cluster characteristics
+   - No labels required - fully unsupervised approach
+   - Useful when rule-based patterns may not capture all patterns
+   - Use `--classification-method ml-unsupervised` to enable
 
 4. **Geographic Grouping** (optional): Groups nearby hub locations using:
    - Haversine distance calculation (default: 10km threshold)
@@ -68,6 +84,8 @@ Options:
 - `--output-dir, -o`: Output directory for reports (default: `output/bot_analysis`)
 - `--contamination, -c`: Expected proportion of anomalies (default: 0.15)
 - `--compute-importances`: Compute feature importances (optional, slower)
+- `--sample-size, -s`: Randomly sample N records from all years before processing (e.g., 1000000 for 1M records)
+- `--classification-method, -m`: Classification method - `rules` for rule-based (default), `ml` for supervised ML-based, or `ml-unsupervised` for unsupervised ML-based
 
 ### Python API
 
@@ -79,7 +97,9 @@ results = run_bot_annotator(
     output_parquet='annotated_data.parquet',
     output_dir='output/bot_analysis',
     contamination=0.15,
-    compute_importances=False
+    compute_importances=False,
+    sample_size=1000000,  # Optional: sample 1M records
+    classification_method='ml'  # 'rules' (default), 'ml' (supervised), or 'ml-unsupervised'
 )
 ```
 
@@ -172,6 +192,23 @@ See `examples/custom_schema_example.py` for more detailed examples.
 - `OLLAMA_URL`: Ollama server URL (default: `http://localhost:11434`)
 - `OLLAMA_MODEL`: Ollama model name (default: `llama3.2`)
 - `HF_MODEL`: Hugging Face model name (default: `microsoft/DialoGPT-medium`)
+
+## Comparing Classification Methods
+
+A comparison script is provided to evaluate all three classification methods on the same dataset:
+
+```bash
+python compare_classification_methods.py \
+    --input data_downloads_parquet.parquet \
+    --sample-size 3000000 \
+    --output-dir output/comparison
+```
+
+This will:
+- Run all three methods (rules, supervised ML, unsupervised ML) on the same sampled data
+- Generate comparison reports showing differences between methods
+- Create CSV files with detailed comparison metrics
+- Save individual results for each method
 
 ## Output
 

@@ -1,4 +1,9 @@
-"""Main feature extraction function."""
+"""Generic feature extraction function.
+
+This module provides a generic feature extraction function that can work
+with any set of extractors. Provider-specific extraction logic should be
+implemented in the providers folder.
+"""
 
 import os
 import pandas as pd
@@ -6,40 +11,33 @@ import numpy as np
 from typing import Optional, List
 
 from ..utils import logger
-from .schema import LogSchema, EBI_SCHEMA
+from .schema import LogSchema
 from .base import BaseFeatureExtractor
-from .standard import (
-    YearlyPatternExtractor,
-    TimeOfDayExtractor,
-    CountryLevelExtractor,
-)
 
 
 def extract_location_features(
     conn, 
     input_parquet: str,
-    schema: Optional[LogSchema] = None,
+    schema: LogSchema,
+    extractors: List[BaseFeatureExtractor],
     custom_extractors: Optional[List[BaseFeatureExtractor]] = None
 ):
     """
-    Extract behavioral features per location for ML analysis.
+    Generic feature extraction function that works with any set of extractors.
     
-    Features capture patterns that distinguish:
-    - Bots: many users, low downloads/user, high hourly user density, irregular time patterns
-    - Mirrors: few users, high downloads/user, systematic patterns, regular time patterns
+    This is a provider-agnostic extraction function. For EBI-specific extraction,
+    use extract_location_features_ebi from providers.ebi.
     
     Args:
         conn: Database connection (DuckDB)
         input_parquet: Path to input parquet file
-        schema: LogSchema defining field mappings (defaults to EBI_SCHEMA)
-        custom_extractors: Optional list of custom feature extractors to apply
-        
+        schema: LogSchema defining field mappings
+        extractors: List of feature extractors to apply
+        custom_extractors: Optional additional custom extractors
+    
     Returns:
         DataFrame with extracted features
     """
-    if schema is None:
-        schema = EBI_SCHEMA
-    
     logger.info("Extracting location-level features...")
     logger.info(f"  Using schema: {schema.__class__.__name__}")
     
@@ -121,20 +119,13 @@ def extract_location_features(
     else:
         df['projects_per_user'] = 0
     
-    # Step 3: Apply standard feature extractors
+    # Step 3: Apply feature extractors
     logger.info("  Step 3/4: Applying feature extractors...")
     
-    # Standard extractors (order matters - yearly must come before country-level)
-    standard_extractors = [
-        YearlyPatternExtractor(schema),
-        TimeOfDayExtractor(schema),
-        CountryLevelExtractor(schema),
-    ]
-    
-    # Combine with custom extractors if provided
-    all_extractors = standard_extractors
+    # Combine extractors
+    all_extractors = extractors
     if custom_extractors:
-        all_extractors = standard_extractors + custom_extractors
+        all_extractors = extractors + custom_extractors
         logger.info(f"  Using {len(custom_extractors)} custom feature extractor(s)")
     
     # Apply extractors in sequence
@@ -145,12 +136,3 @@ def extract_location_features(
     logger.info(f"Extracted features for {len(df):,} locations")
     
     return df
-
-
-def extract_location_features_ebi(conn, input_parquet):
-    """
-    Convenience function for EBI log format (backward compatibility).
-    
-    This is a wrapper that uses the default EBI schema.
-    """
-    return extract_location_features(conn, input_parquet, schema=EBI_SCHEMA)
