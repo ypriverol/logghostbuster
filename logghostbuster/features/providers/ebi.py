@@ -301,6 +301,76 @@ class CountryLevelExtractor(BaseFeatureExtractor):
         
         return df
 
+class TimeWindowExtractor(BaseFeatureExtractor):
+    """
+    Extracts time-windowed (e.g., weekly or monthly) features for each geo_location.
+    This creates a sequence of feature vectors per location.
+    """
+    def __init__(self, schema: LogSchema, time_window: str = 'month', sequence_length: int = 12):
+        super().__init__(schema)
+        if time_window not in ['week', 'month']:
+            raise ValueError("time_window must be 'week' or 'month'")
+        self.time_window = time_window
+        self.sequence_length = sequence_length # Number of past time windows to consider
+
+    def extract(self, df: pd.DataFrame, input_parquet_path: str, conn) -> pd.DataFrame:
+        logger.info(f"  Extracting {self.time_window}-level time-series features...")
+        
+        escaped_path = input_parquet_path
+
+        # Build time_window expression
+        time_window_expr = f"DATE_TRUNC('{self.time_window}', CAST({self.schema.timestamp_field} AS TIMESTAMP))"
+        year_expr = f"EXTRACT(YEAR FROM CAST({self.schema.timestamp_field} AS TIMESTAMP))"
+
+        # Query to get time-windowed aggregates
+        window_query = f"""
+        SELECT
+            {self.schema.location_field} as geo_location,
+            {time_window_expr} as window_start,
+            COUNT(*) as downloads_in_window,
+            COUNT(DISTINCT {self.schema.user_field}) as unique_users_in_window,
+            CAST(COUNT(*) AS DOUBLE) / NULLIF(COUNT(DISTINCT {self.schema.user_field}), 0) as downloads_per_user_in_window
+        FROM read_parquet('{escaped_path}')
+        WHERE {self.schema.location_field} IS NOT NULL
+        AND {self.schema.timestamp_field} IS NOT NULL
+        AND {year_expr} >= {self.schema.min_year}
+        GROUP BY {self.schema.location_field}, window_start
+        ORDER BY {self.schema.location_field}, window_start
+        """
+        
+        window_df = conn.execute(window_query).df()
+
+        # For each location, create a sequence of the last `sequence_length` windows
+        location_sequences = {}
+        for geo_loc, group_df in window_df.groupby('geo_location'):
+            # Sort by time window and get the last `sequence_length` entries
+            sorted_group = group_df.sort_values('window_start').tail(self.sequence_length)
+            
+            # Pad with zeros if fewer than `sequence_length` windows
+            if len(sorted_group) < self.sequence_length:
+                padding_needed = self.sequence_length - len(sorted_group)
+                # Create empty DataFrame for padding with 0s for numeric columns
+                padding_df = pd.DataFrame(0.0, index=np.arange(padding_needed), columns=sorted_group.select_dtypes(include=np.number).columns)
+                # Ensure 'window_start' column is also handled
+                padding_df['window_start'] = pd.NaT
+                padding_df['geo_location'] = geo_loc
+                sorted_group = pd.concat([padding_df, sorted_group], ignore_index=True).tail(self.sequence_length)
+
+            # Convert to list of dicts for easy storage
+            # Exclude 'geo_location' and 'window_start' from the feature vectors
+            features_to_keep = [
+                'downloads_in_window',
+                'unique_users_in_window',
+                'downloads_per_user_in_window'
+            ]
+            location_sequences[geo_loc] = sorted_group[features_to_keep].values.tolist()
+        
+        # Add the sequences to the main DataFrame
+        df['time_series_features'] = df['geo_location'].map(location_sequences)
+        df['time_series_features'] = df['time_series_features'].apply(lambda x: x if isinstance(x, list) else [[0.0]*len(features_to_keep)]*self.sequence_length)
+
+        return df
+
 
 # ============================================================================
 # Core Extraction Function (Internal)
@@ -311,7 +381,9 @@ def _extract_location_features_core(
     input_parquet: str,
     schema: LogSchema,
     extractors: List[BaseFeatureExtractor],
-    custom_extractors: Optional[List[BaseFeatureExtractor]] = None
+    custom_extractors: Optional[List[BaseFeatureExtractor]] = None,
+    time_window: Optional[str] = None, 
+    sequence_length: Optional[int] = None
 ):
     """
     EBI core feature extraction function (internal).
@@ -328,6 +400,8 @@ def _extract_location_features_core(
         schema: LogSchema defining field mappings (EBI_SCHEMA)
         extractors: List of EBI feature extractors to apply
         custom_extractors: Optional additional custom extractors
+        time_window: Granularity of time-series features ('week' or 'month')
+        sequence_length: Number of time windows to include in the sequence
     
     Returns:
         DataFrame with extracted features
@@ -440,7 +514,9 @@ def extract_location_features(
     conn, 
     input_parquet: str,
     schema: Optional[LogSchema] = None,
-    custom_extractors: Optional[List[BaseFeatureExtractor]] = None
+    custom_extractors: Optional[List[BaseFeatureExtractor]] = None,
+    time_window: Optional[str] = 'month',
+    sequence_length: Optional[int] = 12
 ):
     """
     EBI-specific feature extraction function.
@@ -459,6 +535,8 @@ def extract_location_features(
         input_parquet: Path to input parquet file
         schema: LogSchema defining field mappings (defaults to EBI_SCHEMA)
         custom_extractors: Optional list of custom feature extractors to apply
+        time_window: Granularity of time-series features ('week' or 'month')
+        sequence_length: Number of time windows to include in the sequence
     
     Returns:
         DataFrame with extracted features
@@ -471,10 +549,11 @@ def extract_location_features(
         YearlyPatternExtractor(schema),
         TimeOfDayExtractor(schema),
         CountryLevelExtractor(schema),
+        TimeWindowExtractor(schema, time_window, sequence_length), # New extractor
     ]
     
     # Use EBI core extraction function with EBI extractors
-    return _extract_location_features_core(conn, input_parquet, schema, ebi_extractors, custom_extractors)
+    return _extract_location_features_core(conn, input_parquet, schema, ebi_extractors, custom_extractors, time_window, sequence_length)
 
 
 def extract_location_features_ebi(conn, input_parquet):
@@ -503,4 +582,5 @@ __all__ = [
     "YearlyPatternExtractor",
     "TimeOfDayExtractor",
     "CountryLevelExtractor",
+    "TimeWindowExtractor",
 ]

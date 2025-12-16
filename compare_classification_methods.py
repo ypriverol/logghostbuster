@@ -27,7 +27,7 @@ def compare_methods(input_parquet, sample_size=None, base_output_dir='output/com
         sample_size: Number of records to sample (None = use all data)
         base_output_dir: Base directory for output files
     """
-    methods = ['rules', 'ml', 'ml-unsupervised']
+    methods = ['rules', 'ml', 'deep']
     results = {}
     
     logger.info("=" * 80)
@@ -145,7 +145,7 @@ def compare_methods(input_parquet, sample_size=None, base_output_dir='output/com
             rules_bots = results['rules']['bot_locations']
             rules_hubs = results['rules']['hub_locations']
             
-            for method in ['ml', 'ml-unsupervised']:
+            for method in ['ml', 'deep']:
                 if 'error' not in results[method]:
                     ml_bots = results[method]['bot_locations']
                     ml_hubs = results[method]['hub_locations']

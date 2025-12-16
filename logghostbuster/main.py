@@ -8,7 +8,14 @@ import tempfile
 
 from .utils import logger, format_number
 from .features.providers.ebi import extract_location_features
-from .isoforest import train_isolation_forest, compute_feature_importances, classify_locations, classify_locations_ml, classify_locations_ml_unsupervised
+from .config import FEATURE_COLUMNS, APP_CONFIG
+from .models import (
+    train_isolation_forest, 
+    compute_feature_importances, 
+    classify_locations, 
+    classify_locations_ml, 
+    classify_locations_deep
+)
 from .reports import annotate_downloads
 from .reports import generate_report
 from .features.schema import LogSchema, EBI_SCHEMA
@@ -35,7 +42,24 @@ def sample_parquet_records(conn, input_parquet: str, sample_size: int, schema: O
     logger.info(f"Sampling {sample_size:,} records randomly from all years...")
     
     escaped_path = os.path.abspath(input_parquet).replace("'", "''")
-    
+
+    # Get DuckDB configuration
+    duckdb_config = APP_CONFIG.get('duckdb', {})
+    memory_limit = duckdb_config.get('memory_limit', '16GB')
+    max_temp_directory_size = duckdb_config.get('max_temp_directory_size', '20GiB')
+    temp_directory_config = duckdb_config.get('temp_directory', './duckdb-tmp/')
+
+    # Resolve absolute path for temp directory
+    temp_directory_abs = os.path.abspath(temp_directory_config)
+
+    # Create temp directory if it doesn't exist
+    os.makedirs(temp_directory_abs, exist_ok=True)
+
+    # Set DuckDB memory limits and temp directory
+    conn.execute(f"PRAGMA memory_limit='{memory_limit}'")
+    conn.execute(f"PRAGMA max_temp_directory_size='{max_temp_directory_size}'")
+    conn.execute(f"PRAGMA temp_directory='{temp_directory_abs}'")
+
     # First, get total count
     count_result = conn.execute(f"SELECT COUNT(*) as total FROM read_parquet('{escaped_path}')").df()
     total_records = count_result.iloc[0]['total']
@@ -49,18 +73,18 @@ def sample_parquet_records(conn, input_parquet: str, sample_size: int, schema: O
     # Create temporary file for sampled data
     temp_fd, temp_path = tempfile.mkstemp(suffix='.parquet', prefix='logghostbuster_sample_')
     os.close(temp_fd)
-    
-    # Sample records randomly using DuckDB
     escaped_temp = os.path.abspath(temp_path).replace("'", "''")
     
+    # Use TABLESAMPLE RESERVOIR for efficient exact-count sampling (single pass, memory-efficient)
+    # RESERVOIR sampling is designed for exact row counts and is more efficient than ORDER BY RANDOM()
     sample_query = f"""
     COPY (
         SELECT * FROM read_parquet('{escaped_path}')
-        ORDER BY RANDOM()
-        LIMIT {sample_size}
-    ) TO '{escaped_temp}' (FORMAT PARQUET)
+        TABLESAMPLE RESERVOIR ({sample_size} ROWS)
+    ) TO '{escaped_temp}' (FORMAT PARQUET, COMPRESSION 'SNAPPY')
     """
     
+    logger.info(f"Sampling {sample_size:,} records using efficient RESERVOIR sampling method...")
     conn.execute(sample_query)
     
     # Verify sample size
@@ -80,7 +104,10 @@ def run_bot_annotator(
     schema: Optional[LogSchema] = None,
     custom_extractors: Optional[List[BaseFeatureExtractor]] = None,
     sample_size: Optional[int] = None,
-    classification_method: str = 'rules'
+    classification_method: str = 'rules',
+    min_location_downloads: Optional[int] = None,
+    time_window: str = 'month',
+    sequence_length: int = 12
 ):
     """
     Main function to detect bots and download hubs, and annotate the parquet file.
@@ -95,6 +122,7 @@ def run_bot_annotator(
         custom_extractors: Optional list of custom feature extractors to apply
         sample_size: Optional number of records to randomly sample from all years (default: None, uses all data)
         classification_method: Classification method to use - 'rules' for rule-based (default) or 'ml' for ML-based
+        min_location_downloads: Minimum downloads required for a location to be included (default: None, uses schema default of 1)
     
     Returns:
         Dictionary with detection results and statistics
@@ -111,10 +139,46 @@ def run_bot_annotator(
     
     os.makedirs(output_dir, exist_ok=True)
     
+    # Set up schema with optional min_location_downloads override
+    if schema is None:
+        schema = EBI_SCHEMA
+    
+    # Override min_location_downloads if provided
+    if min_location_downloads is not None:
+        schema = LogSchema(
+            location_field=schema.location_field,
+            country_field=schema.country_field,
+            city_field=schema.city_field,
+            user_field=schema.user_field,
+            project_field=schema.project_field,
+            timestamp_field=schema.timestamp_field,
+            year_field=schema.year_field,
+            min_location_downloads=min_location_downloads,
+            min_year=schema.min_year,
+            working_hours_start=schema.working_hours_start,
+            working_hours_end=schema.working_hours_end,
+            night_hours_start=schema.night_hours_start,
+            night_hours_end=schema.night_hours_end,
+        )
+        logger.info(f"Minimum location downloads threshold: {min_location_downloads}")
+    else:
+        logger.info(f"Minimum location downloads threshold: {schema.min_location_downloads} (from schema)")
+    
     conn = duckdb.connect()
     conn.execute("SET threads=1")  # Single thread for stability
-    conn.execute("SET memory_limit='2GB'")
     conn.execute("SET preserve_insertion_order=false")
+    
+    # Apply DuckDB configuration from config.yaml
+    duckdb_config = APP_CONFIG.get('duckdb', {})
+    memory_limit = duckdb_config.get('memory_limit', '16GB')
+    max_temp_directory_size = duckdb_config.get('max_temp_directory_size', '20GiB')
+    temp_directory_config = duckdb_config.get('temp_directory', './duckdb-tmp/')
+    temp_directory_abs = os.path.abspath(temp_directory_config)
+    os.makedirs(temp_directory_abs, exist_ok=True)
+    
+    conn.execute(f"PRAGMA memory_limit='{memory_limit}'")
+    conn.execute(f"PRAGMA max_temp_directory_size='{max_temp_directory_size}'")
+    conn.execute(f"PRAGMA temp_directory='{temp_directory_abs}'")
     
     # Handle sampling if requested
     sampled_file = None
@@ -139,34 +203,11 @@ def run_bot_annotator(
             custom_extractors=custom_extractors
         )
         
-        # Define ML features (including time-of-day and yearly patterns)
-        feature_columns = [
-            'unique_users',
-            'downloads_per_user',
-            'avg_users_per_hour',
-            'max_users_per_hour',
-            'user_cv',
-            'users_per_active_hour',
-            'projects_per_user',
-            'hourly_download_std',
-            'peak_hour_concentration',
-            'working_hours_ratio',
-            'hourly_entropy',
-            'night_activity_ratio',
-            'yearly_entropy',
-            'peak_year_concentration',
-            'years_span',
-            'downloads_per_year',
-            'year_over_year_cv',
-            'fraction_latest_year',
-            'is_new_location',
-            'spike_ratio',
-            'years_before_latest'
-        ]
-        
         # Filter valid rows
-        valid_mask = location_df[feature_columns].notna().all(axis=1)
+        valid_mask = location_df[FEATURE_COLUMNS[:-1]].notna().all(axis=1) # Exclude the placeholder for NA check
         analysis_df = location_df[valid_mask].copy()
+        analysis_df['time_series_features_present'] = analysis_df['time_series_features'].apply(lambda x: 1 if x is not None and len(x) > 0 else 0)
+
         logger.info(f"Analyzing {len(analysis_df):,} locations")
         
         # Step 2: Train Isolation Forest
@@ -174,7 +215,7 @@ def run_bot_annotator(
         logger.info("Step 2: Training Isolation Forest")
         logger.info("=" * 70)
         predictions, scores, _, _ = train_isolation_forest(
-            analysis_df, feature_columns, contamination=contamination
+            analysis_df, [f for f in FEATURE_COLUMNS if f != 'time_series_features_present'], contamination=contamination
         )
         
         analysis_df['is_anomaly'] = predictions == -1
@@ -188,7 +229,7 @@ def run_bot_annotator(
             imp_dir = os.path.join(output_dir, 'feature_importances')
             compute_feature_importances(
                 analysis_df,
-                feature_columns,
+                [f for f in FEATURE_COLUMNS if f != 'time_series_features_present'],
                 analysis_df['is_anomaly'],
                 imp_dir
             )
@@ -198,23 +239,45 @@ def run_bot_annotator(
         logger.info("Step 3: Classifying locations")
         logger.info("=" * 70)
         
+        cluster_df = None # Initialize cluster_df
+
         if classification_method.lower() == 'ml':
             logger.info("Using supervised ML-based classification...")
-            analysis_df = classify_locations_ml(analysis_df, feature_columns)
-        elif classification_method.lower() == 'ml-unsupervised':
-            logger.info("Using unsupervised ML-based classification...")
-            analysis_df = classify_locations_ml_unsupervised(analysis_df, feature_columns)
+            analysis_df = classify_locations_ml(analysis_df, [f for f in FEATURE_COLUMNS if f != 'time_series_features_present'])
+        elif classification_method.lower() == 'deep':
+            logger.info("Using deep architecture classification (Isolation Forest + Transformers)...")
+            analysis_df, cluster_df = classify_locations_deep(analysis_df, 
+                                                  [f for f in FEATURE_COLUMNS if f != 'time_series_features_present'], 
+                                                  contamination=contamination, 
+                                                  sequence_length=sequence_length)
         elif classification_method.lower() == 'rules':
             logger.info("Using rule-based classification...")
             analysis_df = classify_locations(analysis_df)
         else:
-            raise ValueError(f"Unknown classification method: {classification_method}. Must be 'rules', 'ml', or 'ml-unsupervised'")
+            raise ValueError(f"Unknown classification method: {classification_method}. Must be 'rules', 'ml', or 'deep'")
         
         bot_locs = analysis_df[analysis_df['is_bot']].copy()
         hub_locs = analysis_df[analysis_df['is_download_hub']].copy()
         
-        logger.info(f"Bot locations: {len(bot_locs):,}")
+        # For deep architecture method, also show independent users and categories
+        independent_locs = pd.DataFrame()  # Initialize empty
+        other_locs = pd.DataFrame() # Initialize empty
+
+        if classification_method.lower() == 'deep':
+            if 'user_category' in analysis_df.columns:
+                independent_locs = analysis_df[analysis_df['user_category'] == 'independent_user'].copy()
+                other_locs = analysis_df[analysis_df['user_category'] == 'other'].copy()
+            
+            # Log detailed category counts
+            category_counts = analysis_df['user_category'].value_counts()
+            logger.info(f"\nLocation Categories:")
+            for cat, count in category_counts.items():
+                logger.info(f"  {cat}: {count:,} locations ({count/len(analysis_df)*100:.1f}%)")
+        
+        logger.info(f"\nBot locations: {len(bot_locs):,}")
         logger.info(f"Download hub locations: {len(hub_locs):,}")
+        logger.info(f"Independent user locations: {len(independent_locs):,}")
+        logger.info(f"Other/Unclassified locations: {len(other_locs):,}")
         
         # Show top bot locations
         logger.info("\nTop 10 Bot Locations:")
@@ -229,6 +292,14 @@ def run_bot_annotator(
             city = str(row['city'])[:20] if pd.notna(row['city']) else 'N/A'
             logger.info(f"  {row['country']:<15} {city:<20} {int(row['unique_users']):>10,} users, "
                        f"{row['downloads_per_user']:.1f} DL/user")
+        
+        # Show independent users if available
+        if classification_method.lower() == 'deep' and len(independent_locs) > 0:
+            logger.info("\nTop 10 Independent User Locations:")
+            for _, row in independent_locs.sort_values('total_downloads', ascending=False).head(10).iterrows():
+                city = str(row['city'])[:20] if pd.notna(row['city']) else 'N/A'
+                logger.info(f"  {row['country']:<15} {city:<20} {int(row['unique_users']):>10,} users, "
+                           f"{row['downloads_per_user']:.1f} DL/user, {int(row['total_downloads']):>6,} total DL")
         
         # Step 4: Annotate downloads
         logger.info("\n" + "=" * 70)
@@ -248,14 +319,18 @@ def run_bot_annotator(
         logger.info("=" * 70)
         
         escaped_output = os.path.abspath(output_parquet).replace("'", "''")
-        stats_result = conn.execute(f"""
+        
+        # Calculate statistics
+        stats_query = f"""
             SELECT 
                 COUNT(*) as total,
                 SUM(CASE WHEN bot THEN 1 ELSE 0 END) as bots,
                 SUM(CASE WHEN download_hub THEN 1 ELSE 0 END) as hubs,
                 SUM(CASE WHEN NOT bot AND NOT download_hub THEN 1 ELSE 0 END) as normal
             FROM read_parquet('{escaped_output}')
-        """).df().iloc[0]
+        """
+        
+        stats_result = conn.execute(stats_query).df().iloc[0]
         
         stats = {
             'total': int(stats_result['total']),
@@ -264,9 +339,21 @@ def run_bot_annotator(
             'normal': int(stats_result['normal'])
         }
         
+        # Add independent users and other categories if available (from analysis_df, not from parquet yet)
+        if classification_method.lower() == 'deep':
+            if 'user_category' in analysis_df.columns:
+                stats['independent_users'] = int(analysis_df[analysis_df['user_category'] == 'independent_user']['total_downloads'].sum())
+                stats['other_downloads'] = int(analysis_df[analysis_df['user_category'] == 'other']['total_downloads'].sum())
+                stats['normal'] = int(analysis_df[analysis_df['user_category'] == 'normal']['total_downloads'].sum()) # Recalculate normal for deep
+
+        
         logger.info(f"\nTotal downloads: {format_number(stats['total'])}")
         logger.info(f"Bot downloads: {format_number(stats['bots'])} ({stats['bots']/stats['total']*100:.2f}%)")
         logger.info(f"Hub downloads: {format_number(stats['hubs'])} ({stats['hubs']/stats['total']*100:.2f}%)")
+        if 'independent_users' in stats:
+            logger.info(f"Independent user downloads: {format_number(stats['independent_users'])} ({stats['independent_users']/stats['total']*100:.2f}%)")
+        if 'other_downloads' in stats:
+            logger.info(f"Other/Unclassified downloads: {format_number(stats['other_downloads'])} ({stats['other_downloads']/stats['total']*100:.2f}%)")
         logger.info(f"Normal downloads: {format_number(stats['normal'])} ({stats['normal']/stats['total']*100:.2f}%)")
         
         # Step 6: Save analysis and generate report
@@ -280,9 +367,10 @@ def run_bot_annotator(
         logger.info(f"Location analysis saved to: {analysis_file}")
         
         # Generate report
-        generate_report(analysis_df, bot_locs, hub_locs, stats, output_dir, 
-                       schema=schema if schema is not None else EBI_SCHEMA,
-                       available_features=feature_columns,
+        generate_report(analysis_df, bot_locs, hub_locs, independent_locs, other_locs, stats, output_dir, 
+                        cluster_df=cluster_df, # Pass cluster_df here
+                        schema=schema if schema is not None else EBI_SCHEMA,
+                       available_features=FEATURE_COLUMNS,
                        classification_method=classification_method)
         
         logger.info("\n" + "=" * 70)
@@ -332,8 +420,15 @@ def main():
     parser.add_argument('--sample-size', '-s', type=int, default=None,
                        help='Randomly sample N records from all years before processing (e.g., 1000000 for 1M records)')
     parser.add_argument('--classification-method', '-m', type=str, default='rules',
-                       choices=['rules', 'ml', 'ml-unsupervised'],
-                       help='Classification method: "rules" for rule-based (default), "ml" for supervised ML-based, or "ml-unsupervised" for unsupervised ML-based')
+                       choices=['rules', 'ml', 'deep'],
+                       help='Classification method: "rules" for rule-based (default), "ml" for supervised ML-based, or "deep" for deep architecture (Isolation Forest + Transformers)')
+    parser.add_argument('--min-location-downloads', type=int, default=None,
+                       help='Minimum downloads required for a location to be included (default: 1, set higher to filter noise)')
+    parser.add_argument('--time-window', type=str, default='month',
+                       choices=['week', 'month'],
+                       help='Time window granularity for time-series features in deep method (default: month)')
+    parser.add_argument('--sequence-length', type=int, default=12,
+                       help='Number of time windows to include in the time-series sequence for deep method (default: 12)')
     
     args = parser.parse_args()
     
@@ -345,7 +440,10 @@ def main():
             args.contamination,
             compute_importances=args.compute_importances,
             sample_size=args.sample_size,
-            classification_method=args.classification_method
+            classification_method=args.classification_method,
+            min_location_downloads=args.min_location_downloads,
+            time_window=args.time_window,
+            sequence_length=args.sequence_length
         )
         
         logger.info("\nDone!")

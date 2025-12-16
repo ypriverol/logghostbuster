@@ -6,7 +6,7 @@ __version__ = "0.1.0"
 __author__ = "LogGhostbuster Contributors"
 
 from .main import run_bot_annotator
-from .isoforest import train_isolation_forest, compute_feature_importances, classify_locations
+from .models import train_isolation_forest, compute_feature_importances, classify_locations
 from .features import (
     extract_location_features,
     extract_location_features_ebi,
