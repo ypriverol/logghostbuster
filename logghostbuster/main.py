@@ -124,7 +124,10 @@ def run_bot_annotator(
         sample_size: Optional number of records to randomly sample from all years (default: None, uses all data)
         classification_method: Classification method to use - 'rules' for rule-based (default) or 'ml' for ML-based
         min_location_downloads: Minimum downloads required for a location to be included (default: None, uses schema default of 1)
-        annotate: Whether to write an annotated parquet file with bot/download_hub flags (default: True)
+        annotate: Whether to write an annotated parquet file with bot/download_hub flags
+                  (default: True). NOTE: When sampling is enabled (sample_size is not None),
+                  annotation is automatically disabled to avoid overwriting the full dataset
+                  with a sampled subset.
     
     Returns:
         Dictionary with detection results and statistics
@@ -303,12 +306,23 @@ def run_bot_annotator(
                 logger.info(f"  {row['country']:<15} {city:<20} {int(row['unique_users']):>10,} users, "
                            f"{row['downloads_per_user']:.1f} DL/user, {int(row['total_downloads']):>6,} total DL")
         
+        # Decide whether we should annotate in this run.
+        # IMPORTANT: When sampling is enabled, we must NOT annotate the original
+        # parquet with the sampled subset, so we automatically disable annotation.
+        effective_annotate = annotate and (sample_size is None)
+        if annotate and sample_size is not None:
+            logger.info(
+                "Sampling is enabled (sample_size != None); skipping annotation to avoid "
+                "overwriting the full input parquet with a sampled subset. "
+                "To annotate the full dataset, rerun without --sample-size."
+            )
+
         # Step 4: Annotate downloads (optional)
         logger.info("\n" + "=" * 70)
         logger.info("Step 4: Annotating downloads")
         logger.info("=" * 70)
         
-        if annotate:
+        if effective_annotate:
             # Output to specified file or same file (overwrite)
             if output_parquet is None:
                 output_parquet = input_parquet
@@ -408,7 +422,7 @@ def run_bot_annotator(
         logger.info("Bot Annotation Complete!")
         logger.info("=" * 70)
         logger.info(f"\nOutput files:")
-        if annotate and output_parquet is not None:
+        if effective_annotate and output_parquet is not None:
             logger.info(f"  - {output_parquet} (annotated with 'bot' and 'download_hub' columns)")
         logger.info(f"  - {output_dir}/bot_detection_report.txt")
         logger.info(f"  - {output_dir}/location_analysis.csv")
