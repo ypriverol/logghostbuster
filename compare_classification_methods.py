@@ -60,7 +60,8 @@ def compare_methods(input_parquet, sample_size=None, base_output_dir='output/com
                 contamination=0.15,
                 compute_importances=False,
                 sample_size=sample_size,
-                classification_method=method
+                classification_method=method,
+                annotate=False  # Do not write large annotated parquet files during comparison
             )
             
             elapsed_time = time.time() - start_time
@@ -95,9 +96,23 @@ def compare_methods(input_parquet, sample_size=None, base_output_dir='output/com
         f.write("=" * 80 + "\n\n")
         f.write(f"Input file: {input_parquet}\n")
         if sample_size:
-            f.write(f"Sample size: {sample_size:,} records\n\n")
+            f.write(f"Sample size: {sample_size:,} records\n")
         else:
-            f.write("Sample size: ALL DATA (no sampling)\n\n")
+            f.write("Sample size: ALL DATA (no sampling)\n")
+
+        # Compute total downloads from the first successful method.
+        # This uses the algorithm output (stats['total']), ensuring that
+        # the reported downloads match the classification results.
+        total_downloads = None
+        for method in methods:
+            if 'error' not in results.get(method, {}):
+                total_downloads = results[method]['stats']['total']
+                break
+
+        if total_downloads is not None:
+            f.write(f"Total downloads (from analysis): {total_downloads:,}\n\n")
+        else:
+            f.write("\n")
         
         f.write("=" * 80 + "\n")
         f.write("RESULTS SUMMARY\n")

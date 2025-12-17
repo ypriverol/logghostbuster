@@ -107,7 +107,8 @@ def run_bot_annotator(
     classification_method: str = 'rules',
     min_location_downloads: Optional[int] = None,
     time_window: str = 'month',
-    sequence_length: int = 12
+    sequence_length: int = 12,
+    annotate: bool = True,
 ):
     """
     Main function to detect bots and download hubs, and annotate the parquet file.
@@ -123,6 +124,7 @@ def run_bot_annotator(
         sample_size: Optional number of records to randomly sample from all years (default: None, uses all data)
         classification_method: Classification method to use - 'rules' for rule-based (default) or 'ml' for ML-based
         min_location_downloads: Minimum downloads required for a location to be included (default: None, uses schema default of 1)
+        annotate: Whether to write an annotated parquet file with bot/download_hub flags (default: True)
     
     Returns:
         Dictionary with detection results and statistics
@@ -301,59 +303,88 @@ def run_bot_annotator(
                 logger.info(f"  {row['country']:<15} {city:<20} {int(row['unique_users']):>10,} users, "
                            f"{row['downloads_per_user']:.1f} DL/user, {int(row['total_downloads']):>6,} total DL")
         
-        # Step 4: Annotate downloads
+        # Step 4: Annotate downloads (optional)
         logger.info("\n" + "=" * 70)
         logger.info("Step 4: Annotating downloads")
         logger.info("=" * 70)
         
-        # Output to specified file or same file (overwrite)
-        if output_parquet is None:
-            output_parquet = input_parquet
-        
-        annotate_downloads(conn, actual_input_parquet, output_parquet, 
-                          bot_locs, hub_locs, output_dir)
+        if annotate:
+            # Output to specified file or same file (overwrite)
+            if output_parquet is None:
+                output_parquet = input_parquet
+            
+            annotate_downloads(conn, actual_input_parquet, output_parquet, 
+                              bot_locs, hub_locs, output_dir)
+        else:
+            logger.info("Annotation skipped (annotate=False).")
         
         # Step 5: Calculate statistics
         logger.info("\n" + "=" * 70)
         logger.info("Step 5: Calculating statistics")
         logger.info("=" * 70)
-        
-        escaped_output = os.path.abspath(output_parquet).replace("'", "''")
-        
-        # Calculate statistics
-        stats_query = f"""
-            SELECT 
-                COUNT(*) as total,
-                SUM(CASE WHEN bot THEN 1 ELSE 0 END) as bots,
-                SUM(CASE WHEN download_hub THEN 1 ELSE 0 END) as hubs,
-                SUM(CASE WHEN NOT bot AND NOT download_hub THEN 1 ELSE 0 END) as normal
-            FROM read_parquet('{escaped_output}')
-        """
-        
-        stats_result = conn.execute(stats_query).df().iloc[0]
-        
-        stats = {
-            'total': int(stats_result['total']),
-            'bots': int(stats_result['bots']),
-            'hubs': int(stats_result['hubs']),
-            'normal': int(stats_result['normal'])
-        }
-        
-        # Add independent users and other categories if available (from analysis_df, not from parquet yet)
-        if classification_method.lower() == 'deep':
-            if 'user_category' in analysis_df.columns:
-                stats['independent_users'] = int(analysis_df[analysis_df['user_category'] == 'independent_user']['total_downloads'].sum())
-                stats['other_downloads'] = int(analysis_df[analysis_df['user_category'] == 'other']['total_downloads'].sum())
-                stats['normal'] = int(analysis_df[analysis_df['user_category'] == 'normal']['total_downloads'].sum()) # Recalculate normal for deep
 
-        
+        # Prefer statistics derived from the algorithm output (analysis_df)
+        # This ensures bot/hub downloads are computed directly from the
+        # classified locations and their total_downloads, rather than
+        # recomputing from the raw parquet.
+        if 'total_downloads' in analysis_df.columns:
+            total_downloads = int(analysis_df['total_downloads'].sum())
+            bot_downloads = int(analysis_df.loc[analysis_df['is_bot'], 'total_downloads'].sum())
+            hub_downloads = int(analysis_df.loc[analysis_df['is_download_hub'], 'total_downloads'].sum())
+
+            stats: dict = {
+                'total': total_downloads,
+                'bots': bot_downloads,
+                'hubs': hub_downloads,
+            }
+
+            if classification_method.lower() == 'deep' and 'user_category' in analysis_df.columns:
+                # Deep method: explicit categories
+                stats['independent_users'] = int(
+                    analysis_df.loc[analysis_df['user_category'] == 'independent_user', 'total_downloads'].sum()
+                )
+                stats['other_downloads'] = int(
+                    analysis_df.loc[analysis_df['user_category'] == 'other', 'total_downloads'].sum()
+                )
+                stats['normal'] = int(
+                    analysis_df.loc[analysis_df['user_category'] == 'normal', 'total_downloads'].sum()
+                )
+            else:
+                # Rules / ML: normal = everything that is not bot or hub
+                normal_downloads = total_downloads - bot_downloads - hub_downloads
+                stats['normal'] = normal_downloads
+        else:
+            # Fallback: use annotated parquet if total_downloads is not available
+            escaped_output = os.path.abspath(output_parquet).replace("'", "''")
+            stats_query = f"""
+                SELECT 
+                    COUNT(*) as total,
+                    SUM(CASE WHEN bot THEN 1 ELSE 0 END) as bots,
+                    SUM(CASE WHEN download_hub THEN 1 ELSE 0 END) as hubs,
+                    SUM(CASE WHEN NOT bot AND NOT download_hub THEN 1 ELSE 0 END) as normal
+                FROM read_parquet('{escaped_output}')
+            """
+            stats_result = conn.execute(stats_query).df().iloc[0]
+            stats = {
+                'total': int(stats_result['total']),
+                'bots': int(stats_result['bots']),
+                'hubs': int(stats_result['hubs']),
+                'normal': int(stats_result['normal']),
+            }
+
         logger.info(f"\nTotal downloads: {format_number(stats['total'])}")
         logger.info(f"Bot downloads: {format_number(stats['bots'])} ({stats['bots']/stats['total']*100:.2f}%)")
         logger.info(f"Hub downloads: {format_number(stats['hubs'])} ({stats['hubs']/stats['total']*100:.2f}%)")
         if 'independent_users' in stats:
-            logger.info(f"Independent user downloads: {format_number(stats['independent_users'])} ({stats['independent_users']/stats['total']*100:.2f}%)")
+            logger.info(
+                f"Independent user downloads: {format_number(stats['independent_users'])} "
+                f"({stats['independent_users']/stats['total']*100:.2f}%)"
+            )
         if 'other_downloads' in stats:
-            logger.info(f"Other/Unclassified downloads: {format_number(stats['other_downloads'])} ({stats['other_downloads']/stats['total']*100:.2f}%)")
+            logger.info(
+                f"Other/Unclassified downloads: {format_number(stats['other_downloads'])} "
+                f"({stats['other_downloads']/stats['total']*100:.2f}%)"
+            )
         logger.info(f"Normal downloads: {format_number(stats['normal'])} ({stats['normal']/stats['total']*100:.2f}%)")
         
         # Step 6: Save analysis and generate report
@@ -377,7 +408,8 @@ def run_bot_annotator(
         logger.info("Bot Annotation Complete!")
         logger.info("=" * 70)
         logger.info(f"\nOutput files:")
-        logger.info(f"  - {output_parquet} (annotated with 'bot' and 'download_hub' columns)")
+        if annotate and output_parquet is not None:
+            logger.info(f"  - {output_parquet} (annotated with 'bot' and 'download_hub' columns)")
         logger.info(f"  - {output_dir}/bot_detection_report.txt")
         logger.info(f"  - {output_dir}/location_analysis.csv")
         
