@@ -19,10 +19,8 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.utils.data import Dataset, DataLoader
 from sklearn.preprocessing import StandardScaler
 from sklearn.cluster import HDBSCAN
-from sklearn.manifold import TSNE
 from typing import Optional, List, Tuple, Dict
 from dataclasses import dataclass
 from enum import Enum
@@ -157,10 +155,10 @@ def extract_behavioral_features(df: pd.DataFrame, input_parquet: str, conn) -> p
         AND {schema.timestamp_field} IS NOT NULL
     ),
     limited_downloads AS (
-        -- Sample up to 100 downloads per location to reduce memory
+        -- Sample up to 50 downloads per location to reduce memory/disk usage
         SELECT geo_location, download_time 
         FROM sampled_downloads 
-        WHERE rn <= 100
+        WHERE rn <= 50
     ),
     download_intervals AS (
         SELECT 
@@ -320,6 +318,219 @@ def extract_behavioral_features(df: pd.DataFrame, input_parquet: str, conn) -> p
 
 
 # =============================================================================
+# Temporal Sequence Extraction
+# =============================================================================
+
+def extract_temporal_sequences(
+    df: pd.DataFrame,
+    input_parquet: str,
+    conn,
+    max_sequence_length: int = 100,
+    sequence_features: List[str] = None
+) -> pd.DataFrame:
+    """
+    Extract temporal sequences from raw download data.
+    
+    Creates sequences of temporal features for each location:
+    - Time intervals between downloads
+    - Hour of day for each download
+    - Day of week for each download
+    - Download volume (counts per time window)
+    
+    Args:
+        df: DataFrame with location features
+        input_parquet: Path to input parquet file
+        conn: DuckDB connection
+        max_sequence_length: Maximum sequence length (will pad/truncate)
+        sequence_features: List of feature names to extract (default: all)
+        
+    Returns:
+        DataFrame with 'temporal_sequence' column containing sequences
+    """
+    logger.info("Extracting temporal sequences from download data...")
+    
+    from ...features.schema import EBI_SCHEMA
+    schema = EBI_SCHEMA
+    escaped_path = input_parquet.replace("'", "''")
+    
+    # Get list of locations to process
+    locations = df['geo_location'].unique().tolist()
+    n_locations = len(locations)
+    
+    # Create sequences for each location
+    sequences = {}
+    
+    # Process in smaller batches to avoid memory/disk issues
+    batch_size = 500
+    for batch_start in range(0, n_locations, batch_size):
+        batch_end = min(batch_start + batch_size, n_locations)
+        batch_locations = locations[batch_start:batch_end]
+        
+        if batch_start % 5000 == 0:
+            logger.info(f"  Processing locations {batch_start:,}/{n_locations:,}")
+        
+        # Create location filter
+        location_filter = "', '".join([loc.replace("'", "''") for loc in batch_locations])
+        
+        # Extract temporal sequences
+        sequence_query = f"""
+        WITH location_downloads AS (
+            SELECT 
+                {schema.location_field} as geo_location,
+                CAST({schema.timestamp_field} AS TIMESTAMP) as download_time,
+                ROW_NUMBER() OVER (
+                    PARTITION BY {schema.location_field} 
+                    ORDER BY CAST({schema.timestamp_field} AS TIMESTAMP)
+                ) as download_order
+            FROM read_parquet('{escaped_path}')
+            WHERE {schema.location_field} IN ('{location_filter}')
+            AND {schema.timestamp_field} IS NOT NULL
+        ),
+        limited_downloads AS (
+            -- Limit to first 200 downloads per location to reduce memory/disk usage
+            SELECT geo_location, download_time, download_order
+            FROM location_downloads
+            WHERE download_order <= 200
+        ),
+        sequences AS (
+            SELECT 
+                geo_location,
+                -- Time interval since previous download (in hours)
+                EPOCH(download_time - LAG(download_time) OVER (
+                    PARTITION BY geo_location 
+                    ORDER BY download_time
+                )) / 3600.0 as interval_hours,
+                -- Hour of day (0-23)
+                EXTRACT(HOUR FROM download_time) as hour_of_day,
+                -- Day of week (0=Sunday, 6=Saturday)
+                EXTRACT(DOW FROM download_time) as day_of_week,
+                -- Day of month (1-31)
+                EXTRACT(DAY FROM download_time) as day_of_month,
+                -- Week of year (1-52)
+                EXTRACT(WEEK FROM download_time) as week_of_year,
+                -- Normalized timestamp (days since first download)
+                EPOCH(download_time - MIN(download_time) OVER (PARTITION BY geo_location)) / 86400.0 as days_since_start,
+                download_order
+            FROM limited_downloads
+        )
+        SELECT 
+            geo_location,
+            LIST(interval_hours ORDER BY download_order) as intervals,
+            LIST(hour_of_day ORDER BY download_order) as hours,
+            LIST(day_of_week ORDER BY download_order) as days_of_week,
+            LIST(day_of_month ORDER BY download_order) as days_of_month,
+            LIST(week_of_year ORDER BY download_order) as weeks,
+            LIST(days_since_start ORDER BY download_order) as normalized_times,
+            COUNT(*) as sequence_length
+        FROM sequences
+        WHERE interval_hours IS NOT NULL
+        GROUP BY geo_location
+        """
+        
+        try:
+            sequence_df = conn.execute(sequence_query).df()
+            
+            for _, row in sequence_df.iterrows():
+                loc = row['geo_location']
+                seq_len = int(row['sequence_length']) if pd.notna(row['sequence_length']) else 0
+                
+                # Create feature vectors for each time step
+                # Convert to lists and handle None/NaN values
+                def safe_list(value):
+                    if value is None or (isinstance(value, float) and np.isnan(value)):
+                        return []
+                    if isinstance(value, (list, np.ndarray)):
+                        return list(value)
+                    return []
+                
+                intervals = safe_list(row.get('intervals'))
+                hours = safe_list(row.get('hours'))
+                days_of_week = safe_list(row.get('days_of_week'))
+                days_of_month = safe_list(row.get('days_of_month'))
+                weeks = safe_list(row.get('weeks'))
+                normalized_times = safe_list(row.get('normalized_times'))
+                
+                # Build sequence: each time step has [interval_hours, hour_of_day, day_of_week, day_of_month, week_of_year, normalized_time]
+                sequence = []
+                for i in range(min(seq_len, max_sequence_length)):
+                    if i < len(intervals) and len(intervals) > 0:
+                        # Normalize features - handle None/NaN values
+                        interval_val = intervals[i]
+                        if interval_val is None or (isinstance(interval_val, float) and np.isnan(interval_val)):
+                            interval = 0.0
+                        else:
+                            interval = float(interval_val)
+                        # Safely extract other features
+                        hour = float(hours[i]) if i < len(hours) and hours[i] is not None and not (isinstance(hours[i], float) and np.isnan(hours[i])) else 12.0
+                        dow = float(days_of_week[i]) if i < len(days_of_week) and days_of_week[i] is not None and not (isinstance(days_of_week[i], float) and np.isnan(days_of_week[i])) else 3.0
+                        dom = float(days_of_month[i]) if i < len(days_of_month) and days_of_month[i] is not None and not (isinstance(days_of_month[i], float) and np.isnan(days_of_month[i])) else 15.0
+                        week = float(weeks[i]) if i < len(weeks) and weeks[i] is not None and not (isinstance(weeks[i], float) and np.isnan(weeks[i])) else 26.0
+                        norm_time = float(normalized_times[i]) if i < len(normalized_times) and normalized_times[i] is not None and not (isinstance(normalized_times[i], float) and np.isnan(normalized_times[i])) else 0.0
+                        
+                        # Normalize interval (log scale for better distribution)
+                        interval_norm = np.log1p(interval) / 10.0  # log(1+x)/10 to keep in reasonable range
+                        
+                        # Normalize hour to [0, 1]
+                        hour_norm = hour / 23.0
+                        
+                        # Normalize day of week to [0, 1]
+                        dow_norm = dow / 6.0
+                        
+                        # Normalize day of month to [0, 1]
+                        dom_norm = (dom - 1) / 30.0
+                        
+                        # Normalize week to [0, 1]
+                        week_norm = (week - 1) / 51.0
+                        
+                        # Normalize time (already in days)
+                        time_norm = min(norm_time / 365.0, 1.0)  # Cap at 1 year
+                        
+                        sequence.append([
+                            interval_norm,
+                            hour_norm,
+                            dow_norm,
+                            dom_norm,
+                            week_norm,
+                            time_norm
+                        ])
+                    else:
+                        # Padding
+                        sequence.append([0.0] * 6)
+                
+                # Pad or truncate to max_sequence_length
+                if len(sequence) < max_sequence_length:
+                    padding = [[0.0] * 6] * (max_sequence_length - len(sequence))
+                    sequence = padding + sequence
+                else:
+                    sequence = sequence[:max_sequence_length]
+                
+                sequences[loc] = sequence
+                
+        except Exception as e:
+            logger.warning(f"  Error extracting sequences for batch {batch_start}-{batch_end}: {e}")
+            # Fill with empty sequences
+            for loc in batch_locations:
+                if loc not in sequences:
+                    sequences[loc] = [[0.0] * 6] * max_sequence_length
+    
+    # Add sequences to dataframe
+    df['temporal_sequence'] = df['geo_location'].map(sequences)
+    
+    # Fill missing sequences with zeros
+    missing_mask = df['temporal_sequence'].isna()
+    if missing_mask.any():
+        empty_sequence = [[0.0] * 6] * max_sequence_length
+        df.loc[missing_mask, 'temporal_sequence'] = df.loc[missing_mask, 'geo_location'].apply(
+            lambda x: empty_sequence
+        )
+    
+    logger.info(f"  Extracted temporal sequences for {len(sequences):,} locations")
+    logger.info(f"  Sequence length: {max_sequence_length}, Features per timestep: 6")
+    
+    return df
+
+
+# =============================================================================
 # Contrastive Learning for Pattern Discovery
 # =============================================================================
 
@@ -327,6 +538,7 @@ class BehavioralEncoder(nn.Module):
     """
     Encoder that learns behavioral embeddings through contrastive learning.
     
+    Uses LSTM for temporal sequence modeling and Transformer for attention.
     The encoder learns to place similar behavioral patterns close together
     and different patterns far apart in the embedding space.
     """
@@ -336,22 +548,56 @@ class BehavioralEncoder(nn.Module):
         ts_input_dim: int,
         fixed_input_dim: int, 
         embedding_dim: int = 64,
+        lstm_hidden_dim: int = 128,
+        lstm_num_layers: int = 2,
         d_model: int = 128,
         nhead: int = 4,
-        num_layers: int = 2
+        num_layers: int = 2,
+        use_lstm: bool = True
     ):
         super().__init__()
         
-        # Time-series encoder (Transformer)
-        self.ts_projection = nn.Linear(ts_input_dim, d_model)
-        encoder_layer = nn.TransformerEncoderLayer(
-            d_model=d_model,
-            nhead=nhead,
-            dim_feedforward=d_model * 2,
-            dropout=0.1,
-            batch_first=True
-        )
-        self.transformer = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
+        self.use_lstm = use_lstm
+        
+        if use_lstm:
+            # LSTM encoder for temporal sequences
+            # Bidirectional LSTM to capture both forward and backward patterns
+            self.lstm = nn.LSTM(
+                input_size=ts_input_dim,
+                hidden_size=lstm_hidden_dim,
+                num_layers=lstm_num_layers,
+                batch_first=True,
+                bidirectional=True,
+                dropout=0.1 if lstm_num_layers > 1 else 0
+            )
+            # LSTM output is [batch, seq_len, hidden_dim * 2] (bidirectional)
+            lstm_output_dim = lstm_hidden_dim * 2
+            
+            # Attention mechanism to weight important time steps
+            self.attention = nn.MultiheadAttention(
+                embed_dim=lstm_output_dim,
+                num_heads=nhead,
+                dropout=0.1,
+                batch_first=True
+            )
+            
+            # Project LSTM output to d_model
+            self.ts_projection = nn.Sequential(
+                nn.Linear(lstm_output_dim, d_model),
+                nn.ReLU(),
+                nn.Dropout(0.1)
+            )
+        else:
+            # Fallback: Transformer encoder (original approach)
+            self.ts_projection = nn.Linear(ts_input_dim, d_model)
+            encoder_layer = nn.TransformerEncoderLayer(
+                d_model=d_model,
+                nhead=nhead,
+                dim_feedforward=d_model * 2,
+                dropout=0.1,
+                batch_first=True
+            )
+            self.transformer = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
         
         # Fixed features encoder
         self.fixed_encoder = nn.Sequential(
@@ -387,16 +633,46 @@ class BehavioralEncoder(nn.Module):
         Returns:
             Normalized embeddings [batch, embedding_dim]
         """
-        # Encode time-series
-        ts_proj = self.ts_projection(ts_features)
-        ts_encoded = self.transformer(ts_proj)
-        ts_pooled = ts_encoded.mean(dim=1)  # Global average pooling
+        if self.use_lstm:
+            # LSTM encoding
+            lstm_out, (hidden, _) = self.lstm(ts_features)
+            # lstm_out: [batch, seq_len, hidden_dim * 2]
+            # hidden: [num_layers * num_directions, batch, hidden_dim]
+            # For bidirectional: hidden[0]=forward_layer0, hidden[1]=backward_layer0, etc.
+            
+            # Concatenate forward and backward hidden states from last layer
+            num_layers = self.lstm.num_layers
+            if num_layers == 1:
+                # Single layer: hidden[0]=forward, hidden[1]=backward
+                forward_hidden = hidden[0]  # [batch, hidden_dim]
+                backward_hidden = hidden[1]  # [batch, hidden_dim]
+            else:
+                # Multiple layers: last forward is at index (num_layers-1)*2, last backward at (num_layers-1)*2+1
+                forward_hidden = hidden[(num_layers - 1) * 2]  # [batch, hidden_dim]
+                backward_hidden = hidden[(num_layers - 1) * 2 + 1]  # [batch, hidden_dim]
+            
+            # Concatenate to get full hidden state
+            combined_hidden = torch.cat([forward_hidden, backward_hidden], dim=-1)  # [batch, hidden_dim * 2]
+            
+            # Apply attention to weight important time steps
+            # Use the combined hidden state as query
+            query = combined_hidden.unsqueeze(1)  # [batch, 1, hidden_dim * 2]
+            attended_out, _ = self.attention(query, lstm_out, lstm_out)
+            # attended_out: [batch, 1, hidden_dim * 2]
+            
+            # Project to d_model
+            ts_encoded = self.ts_projection(attended_out.squeeze(1))  # [batch, d_model]
+        else:
+            # Transformer encoding (fallback)
+            ts_proj = self.ts_projection(ts_features)
+            ts_encoded_seq = self.transformer(ts_proj)
+            ts_encoded = ts_encoded_seq.mean(dim=1)  # Global average pooling
         
         # Encode fixed features
         fixed_encoded = self.fixed_encoder(fixed_features)
         
         # Combine and project
-        combined = torch.cat([ts_pooled, fixed_encoded], dim=-1)
+        combined = torch.cat([ts_encoded, fixed_encoded], dim=-1)
         embedding = self.projection_head(combined)
         
         # L2 normalize
@@ -498,7 +774,8 @@ def train_pattern_encoder(
     epochs: int = 50,
     batch_size: int = 256,
     learning_rate: float = 1e-3,
-    embedding_dim: int = 64
+    embedding_dim: int = 64,
+    use_lstm: bool = True
 ) -> Tuple[BehavioralEncoder, np.ndarray]:
     """
     Train the behavioral encoder using contrastive learning.
@@ -539,7 +816,8 @@ def train_pattern_encoder(
     encoder = BehavioralEncoder(
         ts_input_dim=ts_features.shape[-1],
         fixed_input_dim=len(fixed_feature_columns),
-        embedding_dim=embedding_dim
+        embedding_dim=embedding_dim,
+        use_lstm=use_lstm
     ).to(device)
     
     optimizer = torch.optim.Adam(encoder.parameters(), lr=learning_rate)
@@ -583,13 +861,31 @@ def train_pattern_encoder(
             avg_loss = total_loss / n_batches
             logger.info(f"  Epoch {epoch + 1}/{epochs}: Loss = {avg_loss:.4f}")
     
-    # Get final embeddings
+    # Get final embeddings in batches to avoid OOM
+    logger.info("  Generating embeddings for all locations...")
     encoder.eval()
+    all_embeddings = []
+    
     with torch.no_grad():
-        all_embeddings = encoder(
-            ts_tensor.to(device), 
-            fixed_tensor.to(device)
-        ).cpu().numpy()
+        # Process in smaller batches to avoid memory issues
+        embedding_batch_size = 1000
+        n_samples = len(df)
+        
+        for i in range(0, n_samples, embedding_batch_size):
+            end_idx = min(i + embedding_batch_size, n_samples)
+            batch_ts = ts_tensor[i:end_idx].to(device)
+            batch_fixed = fixed_tensor[i:end_idx].to(device)
+            
+            batch_embeddings = encoder(batch_ts, batch_fixed).cpu().numpy()
+            all_embeddings.append(batch_embeddings)
+            
+            # Clear GPU cache periodically
+            if (i // embedding_batch_size) % 10 == 0:
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+                logger.info(f"    Generated embeddings: {end_idx:,}/{n_samples:,}")
+        
+        all_embeddings = np.vstack(all_embeddings)
     
     logger.info(f"  Training complete. Embedding shape: {all_embeddings.shape}")
     
@@ -791,6 +1087,103 @@ def _suggest_pattern_name(stats: Dict) -> str:
 
 
 # =============================================================================
+# Coordinated Activity Refinement
+# =============================================================================
+
+def refine_coordinated_activity(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Refine Coordinated_Activity pattern into sub-categories using file patterns.
+    
+    Based on the insight that:
+    - CI/CD and pipelines download same files repeatedly (low file diversity)
+    - Bot-like behavior explores many files (high file diversity)
+    - Legitimate coordination has moderate file diversity
+    
+    Args:
+        df: DataFrame with discovered_pattern column
+        
+    Returns:
+        DataFrame with refined Coordinated_Activity sub-categories
+    """
+    logger.info("\n" + "=" * 60)
+    logger.info("REFINING COORDINATED_ACTIVITY CLASSIFICATION")
+    logger.info("=" * 60)
+    
+    coordinated_mask = df['discovered_pattern'] == 'Coordinated_Activity'
+    n_coordinated = coordinated_mask.sum()
+    
+    if n_coordinated == 0:
+        logger.info("No Coordinated_Activity locations to refine.")
+        return df
+    
+    logger.info(f"Refining {n_coordinated:,} Coordinated_Activity locations...")
+    
+    # Check if we have file diversity feature
+    if 'file_diversity_ratio' not in df.columns:
+        logger.warning("  file_diversity_ratio not available, skipping refinement")
+        return df
+    
+    coordinated_df = df[coordinated_mask].copy()
+    
+    # Category 1: CI/CD_Pipeline - Low file diversity (<0.3)
+    # These download same files repeatedly (testing, building)
+    cicd_mask = coordinated_df['file_diversity_ratio'] < 0.3
+    n_cicd = cicd_mask.sum()
+    
+    if n_cicd > 0:
+        cicd_indices = coordinated_df[cicd_mask].index
+        df.loc[cicd_indices, 'discovered_pattern'] = 'CI_CD_Pipeline'
+        logger.info(f"  CI/CD_Pipeline (low file diversity): {n_cicd:,} locations")
+    
+    # Category 2: Bot_Like_Coordination - High file diversity + bot patterns
+    # Criteria:
+    #   - High file diversity (>0.6) OR
+    #   - (High users >2K AND Low DL/user <10) OR
+    #   - (Moderate users 1K-5K AND Very low DL/user <5)
+    bot_like_mask = (
+        (coordinated_df['file_diversity_ratio'] > 0.6) |
+        ((coordinated_df['unique_users'] > 2000) & (coordinated_df['downloads_per_user'] < 10)) |
+        ((coordinated_df['unique_users'] >= 1000) & (coordinated_df['unique_users'] <= 5000) &
+         (coordinated_df['downloads_per_user'] < 5))
+    ) & ~cicd_mask  # Exclude CI/CD locations
+    
+    n_bot_like = bot_like_mask.sum()
+    
+    if n_bot_like > 0:
+        bot_like_indices = coordinated_df[bot_like_mask].index
+        df.loc[bot_like_indices, 'discovered_pattern'] = 'Bot_Like_Coordination'
+        logger.info(f"  Bot_Like_Coordination: {n_bot_like:,} locations")
+        logger.info(f"    - High file diversity: {(coordinated_df[bot_like_mask]['file_diversity_ratio'] > 0.6).sum():,}")
+        logger.info(f"    - High users + low DL/user: {((coordinated_df[bot_like_mask]['unique_users'] > 2000) & (coordinated_df[bot_like_mask]['downloads_per_user'] < 10)).sum():,}")
+        logger.info(f"    - Moderate users + very low DL/user: {((coordinated_df[bot_like_mask]['unique_users'] >= 1000) & (coordinated_df[bot_like_mask]['unique_users'] <= 5000) & (coordinated_df[bot_like_mask]['downloads_per_user'] < 5)).sum():,}")
+    
+    # Category 3: Legitimate_Coordination - Remaining locations
+    # These have moderate file diversity and reasonable user patterns
+    legitimate_mask = ~cicd_mask & ~bot_like_mask
+    n_legitimate = legitimate_mask.sum()
+    
+    if n_legitimate > 0:
+        legitimate_indices = coordinated_df[legitimate_mask].index
+        df.loc[legitimate_indices, 'discovered_pattern'] = 'Legitimate_Coordination'
+        logger.info(f"  Legitimate_Coordination: {n_legitimate:,} locations")
+    
+    # Summary
+    logger.info("\nRefined Coordinated_Activity breakdown:")
+    refined_coordinated = df[df['discovered_pattern'].isin([
+        'CI_CD_Pipeline', 'Bot_Like_Coordination', 'Legitimate_Coordination'
+    ])]
+    
+    for pattern in ['CI_CD_Pipeline', 'Bot_Like_Coordination', 'Legitimate_Coordination']:
+        pattern_df = df[df['discovered_pattern'] == pattern]
+        if len(pattern_df) > 0:
+            pct = len(pattern_df) / n_coordinated * 100
+            dl_pct = pattern_df['total_downloads'].sum() / coordinated_df['total_downloads'].sum() * 100
+            logger.info(f"  {pattern:25s}: {len(pattern_df):6,} ({pct:5.1f}%) | {pattern_df['total_downloads'].sum():15,.0f} downloads ({dl_pct:5.1f}%)")
+    
+    return df
+
+
+# =============================================================================
 # Main Classification Pipeline
 # =============================================================================
 
@@ -850,10 +1243,27 @@ def classify_with_pattern_discovery(
     if enable_behavioral_features and input_parquet is not None and conn is not None:
         logger.info("  Extracting behavioral features...")
         df = extract_behavioral_features(df, input_parquet, conn)
+        
+        # Step 2b: Extract temporal sequences for LSTM modeling
+        logger.info("  Extracting temporal sequences for LSTM encoding...")
+        df = extract_temporal_sequences(
+            df, 
+            input_parquet, 
+            conn,
+            max_sequence_length=100  # Configurable
+        )
     
     # Step 3: Prepare features for encoding
-    # Use time-series features if available
-    if 'time_series_features' in df.columns:
+    # Use temporal sequences if available, otherwise fallback to time_series_features or fixed features
+    if 'temporal_sequence' in df.columns:
+        # Use extracted temporal sequences
+        ts_list = df['temporal_sequence'].tolist()
+        # All sequences should be the same length (100) with 6 features per timestep
+        ts_features = np.array(ts_list, dtype=np.float32)
+        ts_dim = 6  # interval, hour, day_of_week, day_of_month, week, normalized_time
+        logger.info(f"  Using temporal sequences: shape {ts_features.shape}")
+    elif 'time_series_features' in df.columns:
+        # Fallback to existing time_series_features
         ts_list = df['time_series_features'].tolist()
         # Handle None values
         max_seq_len = max(len(ts) if isinstance(ts, list) else 0 for ts in ts_list)
@@ -872,9 +1282,12 @@ def classify_with_pattern_discovery(
                 ts_features.append([[0.0] * ts_dim] * max_seq_len)
         
         ts_features = np.array(ts_features)
+        logger.info(f"  Using time_series_features: shape {ts_features.shape}")
     else:
         # Fallback to fixed features as sequence length 1
         ts_features = df[feature_columns].fillna(0).values.reshape(-1, 1, len(feature_columns))
+        ts_dim = len(feature_columns)
+        logger.info(f"  Using fixed features as sequences: shape {ts_features.shape}")
     
     # Behavioral feature columns
     behavioral_columns = [
@@ -891,12 +1304,16 @@ def classify_with_pattern_discovery(
     df_uncertain = df[uncertain_mask].copy()
     ts_uncertain = ts_features[uncertain_mask]
     
+    # Use LSTM if we have temporal sequences (sequence length > 1)
+    use_lstm = ts_features.shape[1] > 1 and 'temporal_sequence' in df.columns
+    
     encoder, embeddings = train_pattern_encoder(
         df_uncertain,
         ts_uncertain,
         fixed_columns,
         epochs=contrastive_epochs,
-        embedding_dim=embedding_dim
+        embedding_dim=embedding_dim,
+        use_lstm=use_lstm
     )
     
     # Step 5: Discover patterns through clustering
@@ -922,6 +1339,9 @@ def classify_with_pattern_discovery(
     uncertain_indices = df.index[uncertain_mask].tolist()
     for i, idx in enumerate(uncertain_indices):
         df.at[idx, 'embedding'] = embedding_list[i]
+    
+    # Step 8: Refine Coordinated_Activity using file patterns
+    df = refine_coordinated_activity(df)
     
     # Final summary
     logger.info("\n" + "=" * 60)

@@ -192,8 +192,12 @@ def run_bot_annotator(
     os.makedirs(temp_directory_abs, exist_ok=True)
     
     conn.execute(f"PRAGMA memory_limit='{memory_limit}'")
-    conn.execute(f"PRAGMA max_temp_directory_size='{max_temp_directory_size}'")
+    # Reduce temp directory size to prevent disk space issues
+    conn.execute("PRAGMA max_temp_directory_size='5GiB'")
     conn.execute(f"PRAGMA temp_directory='{temp_directory_abs}'")
+    # Disable temp file spilling if possible to reduce disk usage
+    conn.execute("SET enable_object_cache=true")
+    conn.execute("SET enable_progress_bar=false")
     
     # Handle sampling if requested
     sampled_file = None
