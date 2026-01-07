@@ -3159,6 +3159,10 @@ def classify_locations_deep(df: pd.DataFrame, feature_columns: List[str],
         logger.info(f"    Pre-filtered as legitimate: {obvious_legitimate_mask.sum():,}")
         logger.info(f"    Processed by deep learning: {uncertain_mask.sum():,}")
     
+    # Add detailed category classification
+    logger.info("\n  Classifying detailed categories...")
+    df = _classify_detailed_categories(df)
+    
     return df, cluster_df
 
 
@@ -3552,6 +3556,117 @@ def refine_coordinated_activity(df: pd.DataFrame) -> pd.DataFrame:
             pct = len(pattern_df) / n_coordinated * 100
             dl_pct = pattern_df['total_downloads'].sum() / coordinated_df['total_downloads'].sum() * 100
             logger.info(f"  {pattern:25s}: {len(pattern_df):6,} ({pct:5.1f}%) | {pattern_df['total_downloads'].sum():15,.0f} downloads ({dl_pct:5.1f}%)")
+    
+    return df
+
+
+def _classify_detailed_categories(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Classify locations into detailed categories beyond bot/hub/normal.
+    
+    Categories:
+    - ci_cd_pipeline: Automated CI/CD downloading test data
+    - research_group: Research labs and academic groups  
+    - bulk_downloader: Individual power users
+    - course_workshop: Educational courses and workshops
+    - automated_sync: Automated sync/mirror scripts
+    - api_client: Programmatic API access
+    
+    Args:
+        df: DataFrame with features including behavioral features if available
+        
+    Returns:
+        DataFrame with 'detailed_category' column added
+    """
+    from ...config import get_category_rules
+    
+    rules = get_category_rules()
+    
+    # Initialize with 'unclassified'
+    df['detailed_category'] = 'unclassified'
+    
+    # CI/CD Pipeline detection
+    ci_cd_rule = rules.get('ci_cd_pipeline', {})
+    ci_cd_mask = (
+        (df['unique_users'] <= ci_cd_rule['max_users']) &
+        (df['downloads_per_user'] >= ci_cd_rule['min_downloads_per_user']) &
+        (df['downloads_per_user'] <= ci_cd_rule['max_downloads_per_user'])
+    )
+    if 'file_diversity_ratio' in df.columns and 'max_file_diversity_ratio' in ci_cd_rule:
+        ci_cd_mask &= (df['file_diversity_ratio'] <= ci_cd_rule['max_file_diversity_ratio'])
+    if 'regularity_score' in df.columns and 'min_regularity_score' in ci_cd_rule:
+        ci_cd_mask &= (df['regularity_score'] >= ci_cd_rule['min_regularity_score'])
+    df.loc[ci_cd_mask, 'detailed_category'] = 'ci_cd_pipeline'
+    
+    # Research Group detection
+    rg_rule = rules.get('research_group', {})
+    rg_mask = (
+        (df['unique_users'] >= rg_rule['min_users']) &
+        (df['unique_users'] <= rg_rule['max_users']) &
+        (df['downloads_per_user'] >= rg_rule['min_downloads_per_user']) &
+        (df['downloads_per_user'] <= rg_rule['max_downloads_per_user']) &
+        (df['detailed_category'] == 'unclassified')  # Don't override
+    )
+    if 'working_hours_ratio' in df.columns and 'min_working_hours_ratio' in rg_rule:
+        rg_mask &= (df['working_hours_ratio'] >= rg_rule['min_working_hours_ratio'])
+    if 'file_diversity_ratio' in df.columns and 'min_file_diversity_ratio' in rg_rule:
+        rg_mask &= (df['file_diversity_ratio'] >= rg_rule['min_file_diversity_ratio'])
+    df.loc[rg_mask, 'detailed_category'] = 'research_group'
+    
+    # Bulk Downloader detection
+    bd_rule = rules.get('bulk_downloader', {})
+    bd_mask = (
+        (df['unique_users'] <= bd_rule['max_users']) &
+        (df['downloads_per_user'] >= bd_rule['min_downloads_per_user']) &
+        (df['downloads_per_user'] <= bd_rule['max_downloads_per_user']) &
+        (df['detailed_category'] == 'unclassified')
+    )
+    df.loc[bd_mask, 'detailed_category'] = 'bulk_downloader'
+    
+    # Course/Workshop detection
+    cw_rule = rules.get('course_workshop', {})
+    cw_mask = (
+        (df['unique_users'] >= cw_rule['min_users']) &
+        (df['unique_users'] <= cw_rule['max_users']) &
+        (df['downloads_per_user'] >= cw_rule['min_downloads_per_user']) &
+        (df['downloads_per_user'] <= cw_rule['max_downloads_per_user']) &
+        (df['detailed_category'] == 'unclassified')
+    )
+    if 'file_diversity_ratio' in df.columns and 'max_file_diversity_ratio' in cw_rule:
+        cw_mask &= (df['file_diversity_ratio'] <= cw_rule['max_file_diversity_ratio'])
+    df.loc[cw_mask, 'detailed_category'] = 'course_workshop'
+    
+    # Automated Sync detection
+    as_rule = rules.get('automated_sync', {})
+    as_mask = (
+        (df['unique_users'] <= as_rule['max_users']) &
+        (df['downloads_per_user'] >= as_rule['min_downloads_per_user']) &
+        (df['detailed_category'] == 'unclassified')
+    )
+    if 'regularity_score' in df.columns and 'min_regularity_score' in as_rule:
+        as_mask &= (df['regularity_score'] >= as_rule['min_regularity_score'])
+    df.loc[as_mask, 'detailed_category'] = 'automated_sync'
+    
+    # API Client detection  
+    api_rule = rules.get('api_client', {})
+    api_mask = (
+        (df['unique_users'] >= api_rule['min_users']) &
+        (df['unique_users'] <= api_rule['max_users']) &
+        (df['downloads_per_user'] >= api_rule['min_downloads_per_user']) &
+        (df['downloads_per_user'] <= api_rule['max_downloads_per_user']) &
+        (df['detailed_category'] == 'unclassified')
+    )
+    if 'working_hours_ratio' in df.columns and 'min_working_hours_ratio' in api_rule:
+        api_mask &= (df['working_hours_ratio'] >= api_rule['min_working_hours_ratio'])
+    df.loc[api_mask, 'detailed_category'] = 'api_client'
+    
+    # Log results
+    logger.info("Detailed category classification:")
+    for category in ['ci_cd_pipeline', 'research_group', 'bulk_downloader', 
+                     'course_workshop', 'automated_sync', 'api_client', 'unclassified']:
+        count = (df['detailed_category'] == category).sum()
+        if count > 0:
+            logger.info(f"  {category}: {count:,} locations")
     
     return df
 
