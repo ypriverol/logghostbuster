@@ -3664,10 +3664,14 @@ def _classify_detailed_categories(df: pd.DataFrame) -> pd.DataFrame:
     
     rules = get_category_rules()
     
-    # Initialize with current user_category or 'unclassified'
-    df['detailed_category'] = df.get('user_category', 'unclassified')
+    # Initialize detailed_category with current user_category
+    # This preserves existing classifications (bot, hub, independent_user)
+    if 'user_category' in df.columns:
+        df['detailed_category'] = df['user_category']
+    else:
+        df['detailed_category'] = 'unclassified'
     
-    # Only reclassify locations that are 'normal' or 'other'
+    # Only reclassify locations that are 'normal', 'other', or 'unclassified'
     # Don't override bot, hub, or independent_user classifications
     reclassify_mask = df['detailed_category'].isin(['normal', 'other', 'unclassified'])
     
