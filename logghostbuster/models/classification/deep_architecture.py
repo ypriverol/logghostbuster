@@ -1279,11 +1279,17 @@ def _apply_hub_protection(df: pd.DataFrame) -> pd.DataFrame:
     # Mark as protected hub
     df.loc[definite_hub_mask, 'is_protected_hub'] = True
     
-    # Override any bot classification
-    if 'is_bot' in df.columns:
-        df.loc[definite_hub_mask, 'is_bot'] = False
-    if 'is_bot_neural' in df.columns:
-        df.loc[definite_hub_mask, 'is_bot_neural'] = False
+    # Override any bot classification - consolidated for maintainability
+    bot_columns = {
+        'is_bot': False,
+        'is_bot_neural': False,
+    }
+    
+    for col, value in bot_columns.items():
+        if col in df.columns:
+            df.loc[definite_hub_mask, col] = value
+    
+    # Override user_category if it's set to bot
     if 'user_category' in df.columns:
         df.loc[definite_hub_mask & (df['user_category'] == 'bot'), 'user_category'] = 'download_hub'
     
@@ -3054,7 +3060,7 @@ def classify_locations_deep(df: pd.DataFrame, feature_columns: List[str],
     # =========================================================================
     logger.info("    Performing final safety check...")
     final_hub_override = (
-        (df['is_bot'] == True) & 
+        df['is_bot'] & 
         (df['downloads_per_user'] > 500)
     )
     if final_hub_override.any():
