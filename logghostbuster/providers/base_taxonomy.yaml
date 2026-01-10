@@ -256,7 +256,7 @@ subcategories:
     downloads_per_user:
       min: 500
     unique_users:
-      max: 10
+      max: 100
 
   institutional_hub:
     parent: legitimate_automation

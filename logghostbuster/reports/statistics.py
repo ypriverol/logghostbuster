@@ -254,14 +254,14 @@ class StatisticsCalculator:
         }
 
         # Downloads by country
-        if 'total_downloads' in self.df.columns:
+        if 'total_downloads' in self.df.columns and 'country' in self.df.columns:
             country_downloads = self.df.groupby('country')['total_downloads'].sum().sort_values(ascending=False)
             stats['downloads_by_country'] = {
                 'top_10': country_downloads.head(10).to_dict(),
             }
 
         # Bots by country (using hierarchical classification)
-        if 'automation_category' in self.df.columns:
+        if 'automation_category' in self.df.columns and 'country' in self.df.columns:
             bot_mask = self.df['automation_category'] == 'bot'
             country_bot_counts = self.df[bot_mask]['country'].value_counts()
             stats['bots_by_country'] = {
@@ -269,17 +269,18 @@ class StatisticsCalculator:
             }
 
             # Bot percentage by country (min 10 locations)
-            df_with_bot = self.df.copy()
-            df_with_bot['_is_bot'] = (df_with_bot['automation_category'] == 'bot').astype(int)
-            country_stats = df_with_bot.groupby('country').agg({
-                '_is_bot': 'sum',
-                'geo_location': 'count'
-            }).rename(columns={'geo_location': 'total', '_is_bot': 'bot_count'})
-            country_stats['bot_pct'] = country_stats['bot_count'] / country_stats['total'] * 100
-            country_stats = country_stats[country_stats['total'] >= 10]
-            stats['bot_percentage_by_country'] = {
-                'top_10': country_stats.nlargest(10, 'bot_pct')['bot_pct'].round(2).to_dict(),
-            }
+            if 'geo_location' in self.df.columns:
+                df_with_bot = self.df.copy()
+                df_with_bot['_is_bot'] = (df_with_bot['automation_category'] == 'bot').astype(int)
+                country_stats = df_with_bot.groupby('country').agg({
+                    '_is_bot': 'sum',
+                    'geo_location': 'count'
+                }).rename(columns={'geo_location': 'total', '_is_bot': 'bot_count'})
+                country_stats['bot_pct'] = country_stats['bot_count'] / country_stats['total'] * 100
+                country_stats = country_stats[country_stats['total'] >= 10]
+                stats['bot_percentage_by_country'] = {
+                    'top_10': country_stats.nlargest(10, 'bot_pct')['bot_pct'].round(2).to_dict(),
+                }
 
         return stats
 

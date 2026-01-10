@@ -2885,7 +2885,9 @@ def classify_locations_deep(df: pd.DataFrame, feature_columns: List[str],
         enable_confidence_classification: Whether to use confidence-based classification (default: True)
         compute_feature_importance: Whether to compute detailed feature importance analysis (default: False)
         feature_importance_output_dir: Directory to save feature importance analysis results (required if compute_feature_importance=True)
-    
+        input_parquet: Path to input parquet file (reserved for future use, currently unused)
+        conn: Database connection (reserved for future use, currently unused)
+
     Returns:
         Tuple of (DataFrame with classification columns added, empty cluster_df for compatibility)
     """

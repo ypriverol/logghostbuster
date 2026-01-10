@@ -60,10 +60,9 @@ def compute_feature_importances(analysis_df, feature_columns, labels, output_dir
     
     # Gini importances
     gini_importances = pd.Series(rf.feature_importances_, index=feature_columns).sort_values(ascending=False)
-    
+
     # Permutation importances (roc_auc scorer)
-    # Use n_jobs=1 to avoid joblib issues on some systems
-    import os
+    # Try parallel execution first, fall back to sequential if it fails
     n_jobs_val = min(os.cpu_count() or 1, 4)  # Limit to 4 to avoid resource issues
     try:
         perm = permutation_importance(

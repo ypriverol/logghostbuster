@@ -87,26 +87,56 @@ def _build_mask_from_section(df: pd.DataFrame, section_name: str) -> pd.Series:
     return overall
 
 
+def derive_legacy_columns(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Derive legacy is_bot and is_download_hub columns from hierarchical classification.
+
+    This function maps the hierarchical classification to the legacy boolean columns
+    for backward compatibility with older code.
+
+    Args:
+        df: DataFrame with hierarchical classification columns
+            (behavior_type, automation_category, subcategory)
+
+    Returns:
+        DataFrame with is_bot and is_download_hub columns added
+    """
+    # is_bot: True if automation_category is 'bot'
+    if 'automation_category' in df.columns:
+        df['is_bot'] = df['automation_category'] == 'bot'
+    else:
+        df['is_bot'] = False
+
+    # is_download_hub: True if subcategory indicates a download hub
+    hub_subcategories = {'mirror', 'institutional_hub', 'data_aggregator', 'ci_cd_pipeline'}
+    if 'subcategory' in df.columns:
+        df['is_download_hub'] = df['subcategory'].isin(hub_subcategories)
+    else:
+        df['is_download_hub'] = False
+
+    return df
+
+
 def classify_locations(df: pd.DataFrame) -> pd.DataFrame:
     """
     Legacy classification function for backward compatibility.
-    
+
     This function uses the hierarchical classification system and derives
     legacy is_bot/is_download_hub columns. For new code, use
     classify_locations_hierarchical() directly.
-    
+
     Args:
         df: DataFrame with features
-        
+
     Returns:
         DataFrame with is_bot and is_download_hub columns (legacy format)
     """
     # Use hierarchical classification
     df = classify_locations_hierarchical(df)
-    
+
     # Derive legacy columns for backward compatibility
     df = derive_legacy_columns(df)
-    
+
     return df
 
 

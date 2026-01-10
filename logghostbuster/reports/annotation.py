@@ -149,7 +149,7 @@ def _build_legacy_annotation_query(escaped_input: str, bot_locations: pd.DataFra
     )
     SELECT
         d.*,
-        CASE WHEN bl.geo_location IS NOT NULL THEN 'automated' ELSE 'organic' END as behavior_type,
+        CASE WHEN bl.geo_location IS NOT NULL OR hl.geo_location IS NOT NULL THEN 'automated' ELSE 'organic' END as behavior_type,
         CASE
             WHEN bl.geo_location IS NOT NULL THEN 'bot'
             WHEN hl.geo_location IS NOT NULL THEN 'legitimate_automation'

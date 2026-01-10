@@ -545,8 +545,8 @@ class HTMLReportGenerator:
 
     def generate(self, df: pd.DataFrame, stats: Dict[str, Any],
                  classification_method: str = 'rules',
-                 plot_paths: List[str] = None,
-                 feature_importance: Dict[str, float] = None) -> str:
+                 plot_paths: Optional[List[str]] = None,
+                 feature_importance: Optional[Dict[str, float]] = None) -> str:
         """
         Generate the complete HTML report.
 
@@ -554,12 +554,14 @@ class HTMLReportGenerator:
             df: Analysis DataFrame
             stats: Statistics dictionary from StatisticsCalculator
             classification_method: 'rules' or 'deep'
-            plot_paths: List of paths to plot images
-            feature_importance: Optional feature importance dict
+            plot_paths: Optional list of paths to plot images
+            feature_importance: Optional feature importance dict (reserved for future use)
 
         Returns:
             Path to generated HTML file
         """
+        # Note: feature_importance parameter reserved for future feature importance section
+        _ = feature_importance  # Acknowledge unused parameter
         report_path = self.output_dir / 'report.html'
 
         # Build the report

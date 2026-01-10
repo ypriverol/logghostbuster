@@ -672,13 +672,13 @@ def add_bot_signature_features(df: pd.DataFrame) -> pd.DataFrame:
     else:
         df['request_pattern_anomaly'] = 0.0
     
-    # 7. Weekend/weekday imbalance
-    # Bots work 24/7, humans have patterns
+    # 7. Working hours imbalance
+    # Bots work 24/7, humans tend to work during business hours
     if 'working_hours_ratio' in df.columns:
-        # Expected ratio: ~5/7 weekdays for humans
-        # Bots: closer to uniform or inverted
-        expected_weekday_ratio = 5.0 / 7.0
-        df['weekend_weekday_imbalance'] = np.abs(df['working_hours_ratio'] - expected_weekday_ratio)
+        # Expected ratio: ~0.5-0.6 for humans (working hours = 9-17, ~8/24 hours)
+        # Bots: closer to uniform (~0.33) or inverted (night activity)
+        expected_working_hours_ratio = 0.5
+        df['weekend_weekday_imbalance'] = np.abs(df['working_hours_ratio'] - expected_working_hours_ratio)
     else:
         df['weekend_weekday_imbalance'] = 0.0
     

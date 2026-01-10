@@ -59,10 +59,25 @@ class ProviderConfig:
     _taxonomy_cache: Optional[Dict[str, Any]] = field(default=None, repr=False)
 
     def get_config(self) -> Dict[str, Any]:
-        """Load and return the provider configuration."""
+        """Load and return the provider configuration.
+
+        Returns:
+            Configuration dictionary.
+
+        Raises:
+            FileNotFoundError: If the config file doesn't exist.
+            yaml.YAMLError: If the config file is malformed.
+        """
         if self._config_cache is None:
-            with open(self.config_path, 'r') as f:
-                self._config_cache = yaml.safe_load(f)
+            try:
+                with open(self.config_path, 'r') as f:
+                    self._config_cache = yaml.safe_load(f) or {}
+            except FileNotFoundError:
+                logger.error(f"Configuration file not found: {self.config_path}")
+                raise
+            except yaml.YAMLError as e:
+                logger.error(f"Error parsing YAML configuration: {self.config_path}: {e}")
+                raise
         return self._config_cache
 
     def get_taxonomy(self) -> Dict[str, Any]:

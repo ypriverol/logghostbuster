@@ -265,70 +265,61 @@ LogGhostbuster implements a three-level classification taxonomy (Figure~\ref{fig
 \label{fig:taxonomy}
 \end{figure}
 
-\subsubsection{Level 1: Behavior Type}
-
-The first level distinguishes fundamental behavior patterns:
-
-\textbf{ORGANIC}: Human-like download patterns characterized by:
-\begin{itemize}
-    \item Working hours activity ($\texttt{working\_hours\_ratio} \geq 0.4$)
-    \item Low regularity ($\texttt{regularity\_score} \leq 0.6$)
-    \item Irregular temporal distribution ($\texttt{interval\_cv} \geq 0.7$)
-    \item Limited user counts (typically $< 50$ unique users)
-\end{itemize}
-
-\textbf{AUTOMATED}: Programmatic access patterns characterized by:
-\begin{itemize}
-    \item High regularity ($\texttt{regularity\_score} \geq 0.7$)
-    \item Non-working hours activity ($\texttt{night\_activity\_ratio} \geq 0.35$)
-    \item User coordination ($\texttt{user\_coordination\_score} \geq 0.6$)
-    \item Very high download rates ($\texttt{downloads\_per\_user} \geq 500$)
-\end{itemize}
-
-\subsubsection{Level 2: Automation Category}
-
-Within automated behavior, the second level distinguishes intent:
-
-\textbf{BOT} (Malicious automation):
-\begin{itemize}
-    \item Many users with low downloads per user (bot farms)
-    \item High coordination across user IDs
-    \item Low user authenticity scores
-    \item Suspicious timing patterns
-\end{itemize}
-
-\textbf{LEGITIMATE\_AUTOMATION}:
-\begin{itemize}
-    \item Few users with very high downloads per user (mirrors)
-    \item Consistent, predictable patterns
-    \item Geographic stability
-    \item Working hours or scheduled off-hours activity
-\end{itemize}
-
-\subsubsection{Level 3: Subcategories}
-
-Detailed subcategories provide actionable classification:
+Table~\ref{tab:classification_rules} presents the complete hierarchical classification rules organized by level, class, and the specific feature thresholds used for classification.
 
 \begin{table}[H]
 \centering
-\caption{Level 3 subcategories with characteristic patterns}
-\label{tab:subcategories}
-\begin{tabular}{llp{6cm}}
+\caption{Hierarchical classification rules. Level 1 distinguishes behavior type, Level 2 classifies automation intent, and Level 3 provides detailed subcategories.}
+\label{tab:classification_rules}
+\small
+\begin{tabular}{llp{4.5cm}p{5cm}}
 \toprule
-\textbf{Category} & \textbf{Subcategory} & \textbf{Characteristics} \\
+\textbf{Level} & \textbf{Class} & \textbf{Rules} & \textbf{Description} \\
 \midrule
-\multirow{3}{*}{Organic} & individual\_user & $\leq$5 users, $\leq$20 DL/user \\
-                         & research\_group & 5-50 users, working hours dominant \\
-                         & casual\_bulk & Individual heavy downloaders \\
+\multirow{8}{*}{\rotatebox[origin=c]{90}{\textbf{Level 1}}}
+& \multirow{4}{*}{ORGANIC}
+& \texttt{working\_hours\_ratio} $\geq 0.4$ & \multirow{4}{5cm}{Human-like download patterns with activity during business hours, irregular timing, and limited user counts} \\
+& & \texttt{regularity\_score} $\leq 0.6$ & \\
+& & \texttt{interval\_cv} $\geq 0.7$ & \\
+& & \texttt{unique\_users} $< 50$ & \\
+\cmidrule{2-4}
+& \multirow{4}{*}{AUTOMATED}
+& \texttt{regularity\_score} $\geq 0.7$ & \multirow{4}{5cm}{Programmatic access with high temporal regularity, non-working hours activity, or coordinated multi-user patterns} \\
+& & \texttt{night\_activity\_ratio} $\geq 0.35$ & \\
+& & \texttt{user\_coordination\_score} $\geq 0.6$ & \\
+& & \texttt{downloads\_per\_user} $\geq 500$ & \\
 \midrule
-\multirow{3}{*}{Bot} & scraper\_bot & $\geq$5000 users, $\leq$20 DL/user \\
-                     & crawler\_bot & Systematic file access patterns \\
-                     & coordinated\_bot & High coordination score ($\geq$0.8) \\
+\multirow{8}{*}{\rotatebox[origin=c]{90}{\textbf{Level 2}}}
+& \multirow{4}{*}{BOT}
+& \texttt{unique\_users} $\geq 1000$ & \multirow{4}{5cm}{Malicious automation: bot farms with many fake users, coordinated activity, and suspicious behavioral patterns} \\
+& & \texttt{downloads\_per\_user} $\leq 50$ & \\
+& & \texttt{user\_coordination\_score} $\geq 0.7$ & \\
+& & \texttt{user\_authenticity\_score} $\leq 0.3$ & \\
+\cmidrule{2-4}
+& \multirow{4}{*}{\shortstack[l]{LEGITIMATE\_\\AUTOMATION}}
+& \texttt{downloads\_per\_user} $\geq 500$ & \multirow{4}{5cm}{Benign automation: mirrors, CI/CD pipelines with few users, high per-user activity, and geographic stability} \\
+& & \texttt{unique\_users} $\leq 100$ & \\
+& & \texttt{geographic\_stability} $\geq 0.7$ & \\
+& & \texttt{regularity\_score} $\geq 0.8$ & \\
 \midrule
-\multirow{4}{*}{Legit. Auto.} & mirror & $\geq$500 DL/user, $\leq$100 users \\
-                               & ci\_cd\_pipeline & $\leq$10 users, high regularity \\
-                               & institutional\_hub & 100K+ downloads, institutional patterns \\
-                               & course\_workshop & 50-500 users, 5-30 DL/user \\
+\multirow{10}{*}{\rotatebox[origin=c]{90}{\textbf{Level 3}}}
+& individual\_user & \texttt{unique\_users} $\leq 5$, \texttt{DL/user} $\leq 20$ & Single researchers or casual users \\
+\cmidrule{2-4}
+& research\_group & \texttt{users} 5--50, \texttt{working\_hours} $\geq 0.5$ & Small academic teams \\
+\cmidrule{2-4}
+& scraper\_bot & \texttt{users} $\geq 5000$, \texttt{DL/user} $\leq 20$ & High-frequency automated scrapers \\
+\cmidrule{2-4}
+& crawler\_bot & High \texttt{file\_exploration\_score} & Systematic crawlers \\
+\cmidrule{2-4}
+& coordinated\_bot & \texttt{coordination\_score} $\geq 0.8$ & Bot farms with synchronized activity \\
+\cmidrule{2-4}
+& mirror & \texttt{DL/user} $\geq 500$, \texttt{users} $\leq 100$ & Institutional mirrors \\
+\cmidrule{2-4}
+& ci\_cd\_pipeline & \texttt{users} $\leq 10$, \texttt{regularity} $\geq 0.8$ & Automated testing/builds \\
+\cmidrule{2-4}
+& institutional\_hub & \texttt{downloads} $\geq 100$K & Research infrastructure hubs \\
+\cmidrule{2-4}
+& course\_workshop & \texttt{users} 50--500, \texttt{DL/user} 5--30 & Educational events \\
 \bottomrule
 \end{tabular}
 \end{table}
@@ -543,19 +534,6 @@ Report generation & 0.8 min & 0.8 min \\
 \textbf{Feature engineering dependency}: Performance depends on the quality of engineered features. Novel bot behaviors not captured by current features may evade detection.
 
 \textbf{Computational cost}: The deep method significantly increases processing time. For very large datasets or real-time needs, the rules method may be preferable.
-
-\subsection{Proposed Improvements}
-
-Based on our analysis, we identify several areas for enhancement:
-
-\begin{enumerate}
-    \item \textbf{Online learning}: Implement incremental model updates as new patterns emerge.
-    \item \textbf{Active learning}: Integrate human feedback to improve classification of uncertain cases.
-    \item \textbf{Real-time detection}: Add streaming analysis for immediate bot detection.
-    \item \textbf{Transfer learning}: Pre-train on large log corpora for better generalization.
-    \item \textbf{Explainability}: Add SHAP-based explanations for individual classifications.
-    \item \textbf{API integration}: Provide REST API for integration with repository systems.
-\end{enumerate}
 
 \section{Conclusion}
 
