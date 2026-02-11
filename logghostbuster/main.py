@@ -13,8 +13,9 @@ from .models import (
     train_isolation_forest,
     compute_feature_importances,
     classify_locations_hierarchical,
-    classify_locations_deep
+    classify_locations_deep,
 )
+
 from .reports import annotate_downloads
 from .reports import generate_report
 from .features.providers.ebi import LogSchema, EBI_SCHEMA
@@ -70,7 +71,7 @@ def sample_parquet_records(conn, input_parquet: str, sample_size: int, schema: O
         return input_parquet
     
     # Create temporary file for sampled data
-    temp_fd, temp_path = tempfile.mkstemp(suffix='.parquet', prefix='logghostbuster_sample_')
+    temp_fd, temp_path = tempfile.mkstemp(suffix='.parquet', prefix='deeplogbot_sample_')
     os.close(temp_fd)
     escaped_temp = os.path.abspath(temp_path).replace("'", "''")
     
@@ -105,15 +106,13 @@ def run_bot_annotator(
     sample_size: Optional[int] = None,
     classification_method: str = 'rules',
     min_location_downloads: Optional[int] = None,
-    time_window: str = 'month',
-    sequence_length: int = 12,
     annotate: bool = True,
     output_strategy: str = 'new_file',
     provider: str = 'ebi',
 ):
     """
     Main function to detect bots and download hubs, and annotate the parquet file.
-    
+
     Args:
         input_parquet: Path to input parquet file
         output_parquet: Path to output parquet file (default: overwrites input)
@@ -123,7 +122,7 @@ def run_bot_annotator(
         schema: LogSchema defining field mappings (defaults to EBI_SCHEMA for backward compatibility)
         custom_extractors: Optional list of custom feature extractors to apply
         sample_size: Optional number of records to randomly sample from all years (default: None, uses all data)
-        classification_method: Classification method to use - 'rules' for rule-based (default) or 'ml' for ML-based
+        classification_method: Classification method to use - 'rules' (default) or 'deep'
         min_location_downloads: Minimum downloads required for a location to be included (default: None, uses schema default of 1)
         annotate: Whether to write an annotated parquet file with bot/download_hub flags
                   (default: True). NOTE: When sampling is enabled (sample_size is not None),
@@ -239,7 +238,7 @@ def run_bot_annotator(
 
         logger.info(f"Analyzing {len(analysis_df):,} locations")
         
-        # Extract advanced behavioral features (NEW - High Priority Features)
+        # Extract advanced behavioral features for deep method
         if classification_method.lower() == 'deep':
             logger.info("\nExtracting advanced behavioral features (burst patterns, circadian rhythms, user coordination)...")
             from logghostbuster.features.providers.ebi import (
@@ -336,35 +335,27 @@ def run_bot_annotator(
         cluster_df = None # Initialize cluster_df
 
         if classification_method.lower() == 'deep':
-            logger.info("Using deep architecture classification (Isolation Forest + Transformers)...")
+            logger.info("Using learned deep classification (Seed -> VAE -> IF -> Temporal -> Fusion)...")
             # Set up feature importance output directory if requested
             feature_importance_dir = None
             if compute_importances:
                 feature_importance_dir = os.path.join(output_dir, 'feature_importances_deep')
                 logger.info(f"Feature importance analysis will be saved to: {feature_importance_dir}")
-            
+
             # Filter feature columns to only those that actually exist in the dataframe
             available_features_for_deep = [f for f in FEATURE_COLUMNS if f != 'time_series_features_present' and f in analysis_df.columns]
             logger.info(f"Using {len(available_features_for_deep)} features for deep classification")
             if len(available_features_for_deep) < len(FEATURE_COLUMNS) - 1:
                 missing_deep = [f for f in FEATURE_COLUMNS if f != 'time_series_features_present' and f not in analysis_df.columns]
                 logger.info(f"Note: {len(missing_deep)} features not available for deep classification: {missing_deep[:5]}{'...' if len(missing_deep) > 5 else ''}")
-            
-            analysis_df, cluster_df = classify_locations_deep(analysis_df, 
-                                                  available_features_for_deep, 
-                                                  contamination=contamination, 
-                                                  sequence_length=sequence_length,
+
+            # Learned pipeline: Seed → VAE → Deep IF → Temporal → Fusion
+            analysis_df, cluster_df = classify_locations_deep(analysis_df,
+                                                  available_features_for_deep,
                                                   compute_feature_importance=compute_importances,
                                                   feature_importance_output_dir=feature_importance_dir,
                                                   input_parquet=actual_input_parquet,
                                                   conn=conn)
-        elif classification_method.lower() == 'pattern':
-            # Pattern discovery has been merged into deep architecture
-            raise ValueError(
-                "The 'pattern' classification method has been consolidated into 'deep' architecture. "
-                "Please use '--classification-method deep' with optional parameters: "
-                "--enable-behavioral-extraction and --encoder-type lstm|transformer|hybrid"
-            )
         elif classification_method.lower() == 'rules':
             logger.info("Using rule-based classification with hierarchical taxonomy...")
             # Apply hierarchical classification
@@ -447,7 +438,7 @@ def run_bot_annotator(
             if 'user_category' in analysis_df.columns:
                 independent_locs = analysis_df[analysis_df['user_category'] == 'independent_user'].copy()
                 other_locs = analysis_df[analysis_df['user_category'] == 'other'].copy()
-            
+
             # Log detailed category counts
             category_counts = analysis_df['user_category'].value_counts()
             logger.info(f"\nLocation Categories:")
@@ -704,14 +695,9 @@ def main():
                        help='Randomly sample N records from all years before processing (e.g., 1000000 for 1M records)')
     parser.add_argument('--classification-method', '-m', type=str, default='rules',
                        choices=['rules', 'deep'],
-                       help='Classification method: "rules" for rule-based (default) or "deep" for deep architecture (Isolation Forest + Transformers)')
+                       help='Classification method: "rules" for rule-based (default), "deep" for deep architecture')
     parser.add_argument('--min-location-downloads', type=int, default=None,
                        help='Minimum downloads required for a location to be included (default: 1, set higher to filter noise)')
-    parser.add_argument('--time-window', type=str, default='month',
-                       choices=['week', 'month'],
-                       help='Time window granularity for time-series features in deep method (default: month)')
-    parser.add_argument('--sequence-length', type=int, default=12,
-                       help='Number of time windows to include in the time-series sequence for deep method (default: 12)')
     parser.add_argument('--output-strategy', type=str, default='new_file',
                        choices=['new_file', 'reports_only', 'overwrite'],
                        help='Output file strategy: "new_file" creates annotated file with _annotated suffix (default), "reports_only" only generates reports, "overwrite" rewrites original file')
@@ -753,10 +739,8 @@ def main():
             sample_size=args.sample_size,
             classification_method=args.classification_method,
             min_location_downloads=args.min_location_downloads,
-            time_window=args.time_window,
-            sequence_length=args.sequence_length,
             output_strategy=args.output_strategy,
-            provider=args.provider
+            provider=args.provider,
         )
         
         logger.info("\nDone!")

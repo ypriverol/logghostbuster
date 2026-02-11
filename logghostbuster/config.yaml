@@ -487,3 +487,20 @@ classification:
       max_downloads_per_user: 20
       max_file_diversity_ratio: 0.3
 
+# ==========================================================================
+# DEEP RECONCILIATION CONFIGURATION
+# ==========================================================================
+# Configuration for the deep classification reconciliation step.
+# The deep method processes ALL locations through the full pipeline,
+# treating pre-filter output as soft priors rather than hard decisions.
+# A reconciliation step resolves disagreements between pre-filter and pipeline.
+# ==========================================================================
+
+deep_reconciliation:
+  # Pipeline confidence needed to override a prefilter decision
+  override_threshold: 0.7
+  # Stricter bar for overriding obvious_bot → organic (high-risk override)
+  strict_override_threshold: 0.8
+  # Controls the steepness of the sigmoid used for soft prior computation
+  prior_sigmoid_steepness: 5.0
+

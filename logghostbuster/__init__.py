@@ -1,11 +1,11 @@
 """
-LogGhostbuster: A hybrid Isolation Forest-based system for detecting bot behavior in log data.
+DeepLogBot: A hybrid Isolation Forest-based system for detecting bot behavior in log data.
 
 This package provides tools for detecting bots and download hubs in log data,
 with support for multiple log providers and extensible classification rules.
 
 Provider System:
-    LogGhostbuster supports multiple log providers (EBI, custom, etc.). Each provider
+    DeepLogBot supports multiple log providers (EBI, custom, etc.). Each provider
     defines its own schema, feature extractors, and classification rules.
 
     Available providers can be listed with:
@@ -29,7 +29,7 @@ Example:
 """
 
 __version__ = "0.1.0"
-__author__ = "LogGhostbuster Contributors"
+__author__ = "DeepLogBot Contributors"
 
 from .main import run_bot_annotator
 from .models import (

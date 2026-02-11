@@ -50,25 +50,22 @@ def parse_geo_location(geo_loc_str: Optional[str]) -> Tuple[Optional[float], Opt
         return None, None
 
 
-def group_nearby_locations_with_llm(hub_locations: pd.DataFrame, max_distance_km: int = 10, use_llm: bool = True) -> Dict[str, str]:
+def group_nearby_locations_with_llm(hub_locations: pd.DataFrame, max_distance_km: int = 10, **kwargs) -> Dict[str, str]:
     """
-    Group nearby hub locations using geographic distance and optionally LLM.
-    
+    Group nearby hub locations using geographic distance.
+
     Returns a mapping: original_geo_location -> group_id (canonical location)
-    
+
     Args:
         hub_locations: DataFrame with hub locations including 'geo_location', 'country', 'city', etc.
         max_distance_km: Maximum distance in km for grouping locations
-        use_llm: Whether to use LLM for canonical naming
-        
+
     Returns:
         Dictionary mapping geo_location to canonical location
     """
     from ..utils import logger
-    from ..llm import get_llm_canonical_name
-    
+
     logger.info(f"Grouping {len(hub_locations)} hub locations (max_distance={max_distance_km}km)...")
-    logger.info("  Step 1: Geographic distance-based grouping...")
     
     # Parse coordinates
     locations_with_coords = []
@@ -121,11 +118,6 @@ def group_nearby_locations_with_llm(hub_locations: pd.DataFrame, max_distance_km
         # Assign group ID
         group_geo_locs = [loc['geo_location'] for loc in group_members]
         canonical_location = group_members[0]['geo_location']  # Use first as default
-        
-        # If using LLM and group has multiple members, get canonical name
-        if use_llm and len(group_members) > 1:
-            logger.info(f"    Calling LLM for group {group_id + 1} ({len(group_members)} locations)...")
-            canonical_location = get_llm_canonical_name(group_members)
         
         for geo_loc in group_geo_locs:
             groups[geo_loc] = canonical_location

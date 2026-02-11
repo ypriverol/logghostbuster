@@ -18,6 +18,26 @@ from ...schema import LogSchema
 from .schema import LogEbiSchema, EBI_SCHEMA
 from ....utils import logger
 
+# Import new feature extraction functions
+from .behavioral import (
+    extract_timing_precision_features,
+    extract_user_distribution_features,
+    extract_session_behavior_features,
+)
+from .discriminative import (
+    extract_access_pattern_features,
+    extract_statistical_anomaly_features,
+    extract_comparative_features,
+)
+from .timeseries import (
+    extract_outburst_features,
+    extract_periodicity_features,
+    extract_trend_features,
+    extract_recency_features,
+    extract_distribution_shape_features,
+    extract_all_timeseries_features,
+)
+
 
 # ============================================================================
 # Feature Extractors
@@ -302,6 +322,171 @@ class CountryLevelExtractor(BaseFeatureExtractor):
         
         return df
 
+class ProtocolFeatureExtractor(BaseFeatureExtractor):
+    """Extract download protocol features (http, ftp, aspera, globus)."""
+
+    def extract(self, df: pd.DataFrame, input_parquet_path: str, conn) -> pd.DataFrame:
+        """Extract protocol-based legitimacy features."""
+        logger.info("  Extracting protocol features...")
+
+        if self.schema.method_field is None:
+            logger.info("    No method_field in schema, defaulting to http-only")
+            df['http_ratio'] = 1.0
+            df['ftp_ratio'] = 0.0
+            df['aspera_ratio'] = 0.0
+            df['globus_ratio'] = 0.0
+            df['protocol_diversity'] = 1
+            df['protocol_legitimacy_score'] = 0.1
+            return df
+
+        escaped_path = input_parquet_path
+
+        year_expr = f"EXTRACT(YEAR FROM CAST({self.schema.timestamp_field} AS TIMESTAMP))"
+        if self.schema.year_field:
+            year_expr = self.schema.year_field
+
+        protocol_query = f"""
+        SELECT
+            {self.schema.location_field} as geo_location,
+            COUNT(*) as total_dl,
+            COUNT(CASE WHEN LOWER({self.schema.method_field}) = 'http' THEN 1 END) as http_count,
+            COUNT(CASE WHEN LOWER({self.schema.method_field}) = 'ftp' THEN 1 END) as ftp_count,
+            COUNT(CASE WHEN LOWER({self.schema.method_field}) LIKE '%aspera%' THEN 1 END) as aspera_count,
+            COUNT(CASE WHEN LOWER({self.schema.method_field}) LIKE '%globus%' THEN 1 END) as globus_count,
+            COUNT(DISTINCT {self.schema.method_field}) as protocol_diversity
+        FROM read_parquet('{escaped_path}')
+        WHERE {self.schema.location_field} IS NOT NULL
+        AND {self.schema.timestamp_field} IS NOT NULL
+        AND {year_expr} >= {self.schema.min_year}
+        GROUP BY {self.schema.location_field}
+        """
+
+        try:
+            proto_df = conn.execute(protocol_query).df()
+
+            proto_df['http_ratio'] = proto_df['http_count'] / proto_df['total_dl'].replace(0, 1)
+            proto_df['ftp_ratio'] = proto_df['ftp_count'] / proto_df['total_dl'].replace(0, 1)
+            proto_df['aspera_ratio'] = proto_df['aspera_count'] / proto_df['total_dl'].replace(0, 1)
+            proto_df['globus_ratio'] = proto_df['globus_count'] / proto_df['total_dl'].replace(0, 1)
+
+            # Weighted legitimacy score: aspera/globus = high, ftp = moderate, http = low
+            proto_df['protocol_legitimacy_score'] = (
+                proto_df['aspera_ratio'] * 0.9 +
+                proto_df['globus_ratio'] * 0.95 +
+                proto_df['ftp_ratio'] * 0.6 +
+                proto_df['http_ratio'] * 0.1
+            )
+
+            merge_cols = [
+                'geo_location', 'http_ratio', 'ftp_ratio', 'aspera_ratio',
+                'globus_ratio', 'protocol_diversity', 'protocol_legitimacy_score'
+            ]
+            df = df.merge(proto_df[merge_cols], on='geo_location', how='left')
+
+            # Fill defaults
+            df['http_ratio'] = df['http_ratio'].fillna(1.0)
+            df['ftp_ratio'] = df['ftp_ratio'].fillna(0.0)
+            df['aspera_ratio'] = df['aspera_ratio'].fillna(0.0)
+            df['globus_ratio'] = df['globus_ratio'].fillna(0.0)
+            df['protocol_diversity'] = df['protocol_diversity'].fillna(1)
+            df['protocol_legitimacy_score'] = df['protocol_legitimacy_score'].fillna(0.1)
+
+            aspera_locs = (df['aspera_ratio'] > 0).sum()
+            globus_locs = (df['globus_ratio'] > 0).sum()
+            logger.info(f"    Aspera locations: {aspera_locs}, Globus locations: {globus_locs}")
+            logger.info(f"    ✓ Protocol features extracted for {len(proto_df)} locations")
+        except Exception as e:
+            logger.warning(f"    ✗ Protocol feature extraction failed: {e}")
+            df['http_ratio'] = 1.0
+            df['ftp_ratio'] = 0.0
+            df['aspera_ratio'] = 0.0
+            df['globus_ratio'] = 0.0
+            df['protocol_diversity'] = 1
+            df['protocol_legitimacy_score'] = 0.1
+
+        return df
+
+
+class NewBotDetectionFeaturesExtractor(BaseFeatureExtractor):
+    """
+    Extract new bot detection features (timing, user distribution, session, access patterns, etc.).
+
+    This extractor adds 24 new features across 6 categories:
+    - Timing precision (4 features): request timing patterns
+    - User distribution (4 features): user behavior distribution
+    - Session behavior (4 features): session-level patterns
+    - Access patterns (5 features): file access patterns
+    - Statistical anomalies (3 features): statistical law violations
+    - Comparative features (4 features): peer/context comparison
+    """
+
+    def extract(self, df: pd.DataFrame, input_parquet_path: str, conn) -> pd.DataFrame:
+        """Extract all new bot detection features."""
+        logger.info("  Extracting new bot detection features...")
+
+        escaped_path = input_parquet_path
+
+        # 1. Timing precision features (detect mechanical scheduling)
+        df = extract_timing_precision_features(df, escaped_path, conn, self.schema)
+
+        # 2. User distribution features (detect bot farms)
+        df = extract_user_distribution_features(df, escaped_path, conn, self.schema)
+
+        # 3. Session behavior features (detect bot sessions)
+        df = extract_session_behavior_features(df, escaped_path, conn, self.schema)
+
+        # 4. Access pattern features (detect crawlers/scrapers)
+        df = extract_access_pattern_features(df, escaped_path, conn, self.schema)
+
+        # 5. Statistical anomaly features (detect impossible patterns)
+        df = extract_statistical_anomaly_features(df, escaped_path, conn, self.schema)
+
+        # 6. Comparative features (detect outliers)
+        df = extract_comparative_features(df, escaped_path, conn, self.schema)
+
+        logger.info("  ✓ New bot detection features extracted")
+
+        return df
+
+
+class TimeSeriesFeaturesExtractor(BaseFeatureExtractor):
+    """
+    Extract advanced time series features for bot detection.
+
+    This extractor adds 23 new features across 5 categories:
+    - Outburst detection (6 features): spike and anomaly patterns
+    - Periodicity detection (4 features): cyclical patterns
+    - Trend analysis (5 features): long-term direction
+    - Recency weighting (4 features): recent behavior emphasis
+    - Distribution shape (4 features): higher-order statistics
+    """
+
+    def extract(self, df: pd.DataFrame, input_parquet_path: str, conn) -> pd.DataFrame:
+        """Extract all time series features."""
+        logger.info("  Extracting time series features...")
+
+        escaped_path = input_parquet_path
+
+        # 1. Outburst detection (detect spikes and attacks)
+        df = extract_outburst_features(df, escaped_path, conn, self.schema)
+
+        # 2. Periodicity detection (detect scheduled behavior)
+        df = extract_periodicity_features(df, escaped_path, conn, self.schema)
+
+        # 3. Trend analysis (detect growth/decline patterns)
+        df = extract_trend_features(df, escaped_path, conn, self.schema)
+
+        # 4. Recency weighting (emphasize recent behavior)
+        df = extract_recency_features(df, escaped_path, conn, self.schema)
+
+        # 5. Distribution shape (capture statistical properties)
+        df = extract_distribution_shape_features(df, escaped_path, conn, self.schema)
+
+        logger.info("  ✓ Time series features extracted")
+
+        return df
+
+
 class TimeWindowExtractor(BaseFeatureExtractor):
     """
     Extracts time-windowed (e.g., weekly or monthly) features for each geo_location.
@@ -341,7 +526,7 @@ class TimeWindowExtractor(BaseFeatureExtractor):
         window_df = conn.execute(window_query).df()
 
         if window_df.empty:
-            # Enhanced features: 3 base + 3 rate_of_change + 4 statistics + 1 trend + 1 volatility = 12 features
+            # Additional features: 3 base + 3 rate_of_change + 4 statistics + 1 trend + 1 volatility = 12 features
             df['time_series_features'] = [[0.0] * 12] * len(df)
             return df
 
@@ -352,7 +537,7 @@ class TimeWindowExtractor(BaseFeatureExtractor):
             sorted_group['downloads_per_user_in_window'] = sorted_group['downloads_in_window'] / sorted_group['unique_users_in_window'].replace(0, np.nan)
             sorted_group['downloads_per_user_in_window'] = sorted_group['downloads_per_user_in_window'].fillna(0.0)
             
-            # Enhanced features: Rate of change (percentage change from previous window)
+            # Rate of change features (percentage change from previous window)
             sorted_group['dl_rate_change'] = sorted_group['downloads_in_window'].pct_change().fillna(0.0)
             sorted_group['users_rate_change'] = sorted_group['unique_users_in_window'].pct_change().fillna(0.0)
             sorted_group['dl_per_user_rate_change'] = sorted_group['downloads_per_user_in_window'].pct_change().fillna(0.0)
@@ -631,7 +816,10 @@ def extract_location_features(
         YearlyPatternExtractor(schema),
         TimeOfDayExtractor(schema),
         CountryLevelExtractor(schema),
-        TimeWindowExtractor(schema, time_window, sequence_length), # New extractor
+        ProtocolFeatureExtractor(schema),          # Protocol features (6 features)
+        NewBotDetectionFeaturesExtractor(schema),  # New bot detection features (24 features)
+        TimeSeriesFeaturesExtractor(schema),       # Time series features (23 features)
+        TimeWindowExtractor(schema, time_window, sequence_length),
     ]
     
     # Use EBI core extraction function with EBI extractors
@@ -664,5 +852,8 @@ __all__ = [
     "YearlyPatternExtractor",
     "TimeOfDayExtractor",
     "CountryLevelExtractor",
+    "ProtocolFeatureExtractor",
+    "NewBotDetectionFeaturesExtractor",
+    "TimeSeriesFeaturesExtractor",
     "TimeWindowExtractor",
 ]

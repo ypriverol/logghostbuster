@@ -19,6 +19,7 @@ class LogEbiSchema(LogSchema):
             city_field="geoip_city_name",
             user_field="user",
             project_field="accession",
+            method_field="method",
             timestamp_field="timestamp",
             year_field=None,  # Will be extracted from timestamp
             min_location_downloads=1,

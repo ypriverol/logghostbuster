@@ -1,4 +1,4 @@
-"""Configuration management for LogGhostbuster.
+"""Configuration management for DeepLogBot.
 
 This module handles:
 - Global application configuration (from config.yaml)
@@ -96,6 +96,13 @@ FEATURE_COLUMNS = [
     'request_pattern_anomaly',
     'weekend_weekday_imbalance',
     'is_high_velocity',
+    # Protocol Features (6) - download protocol legitimacy signals
+    'http_ratio',
+    'ftp_ratio',
+    'aspera_ratio',
+    'globus_ratio',
+    'protocol_diversity',
+    'protocol_legitimacy_score',
     # Discriminative features (for Stage 2: Malicious vs Legitimate Automation)
     'file_exploration_score',
     'file_mirroring_score',
@@ -115,7 +122,77 @@ FEATURE_COLUMNS = [
     'bot_vs_legitimate_score',
     'is_likely_malicious',
     'is_likely_legitimate_automation',
-    'time_series_features_present' # Placeholder feature for deep model to know time series exist
+    'time_series_features_present',  # Placeholder feature for deep model to know time series exist
+    # ===========================================================================
+    # NEW BOT DETECTION FEATURES (24 features)
+    # Added for improved discrimination between bot types
+    # ===========================================================================
+    # Timing Precision Features (4) - detect mechanical scheduling
+    'request_interval_mode',       # Most common interval between requests
+    'round_second_ratio',          # Fraction on round seconds (:00, :15, :30, :45)
+    'millisecond_variance',        # Variance of millisecond component
+    'interval_entropy',            # Entropy of interval distribution
+    # User Distribution Features (4) - detect bot farms
+    'user_entropy',                # Shannon entropy across users
+    'user_gini_coefficient',       # Inequality of download distribution
+    'single_download_user_ratio',  # Fraction of one-time users
+    'power_user_ratio',            # Concentration in top 10% users
+    # Session Behavior Features (4) - distinguish human vs bot sessions
+    'session_duration_cv',         # Variability of session lengths
+    'inter_session_regularity',    # Regularity of session gaps
+    'downloads_per_session_cv',    # Consistency of session intensity
+    'session_start_hour_entropy',  # Randomness of session timing
+    # Access Pattern Features (5) - detect crawlers/scrapers
+    'alphabetical_access_score',   # Correlation with alphabetical order
+    'sequential_file_ratio',       # Fraction of sequential file accesses
+    'directory_traversal_score',   # Following directory structure
+    'retry_ratio',                 # Files accessed multiple times
+    'unique_file_ratio',           # Unique files / total downloads
+    # Statistical Anomaly Features (3) - detect impossible patterns
+    'benford_deviation',           # Deviation from Benford's Law
+    'hourly_uniformity_score',     # How uniform hourly distribution is
+    'weekday_pattern_score',       # Deviation from expected weekday ratio
+    # Comparative Features (4) - detect outliers in context
+    'country_zscore',              # Z-score vs country average
+    'temporal_trend_anomaly',      # Deviation from historical trend
+    'peer_similarity',             # Similarity to peer locations
+    'global_rank_percentile',      # Percentile by download volume
+    # ===========================================================================
+    # TIME SERIES FEATURES (23 features)
+    # Advanced temporal dynamics for bot pattern detection
+    # ===========================================================================
+    # Outburst Detection Features (6) - detect spikes and attacks
+    'outburst_count',              # Number of significant spikes (>2 std)
+    'outburst_intensity',          # Average magnitude of outbursts
+    'max_outburst_zscore',         # Highest Z-score across time windows
+    'outburst_ratio',              # Fraction of activity in outbursts
+    'time_since_last_outburst',    # Recency of latest spike
+    'longest_outburst_streak',     # Max consecutive high-activity periods
+    # Periodicity Detection Features (4) - detect scheduled behavior
+    'weekly_autocorr',             # Autocorrelation at 7-day lag
+    'dominant_period_days',        # Most significant period (FFT)
+    'periodicity_strength',        # Strength of dominant period
+    'period_regularity',           # How consistent the period is
+    # Trend Analysis Features (5) - detect long-term direction
+    'trend_slope',                 # Linear trend direction (normalized)
+    'trend_strength',              # R² of linear fit
+    'trend_acceleration',          # Second derivative (speeding up/slowing)
+    'detrended_volatility',        # Volatility after removing trend
+    'trend_direction',             # Categorical (-1, 0, +1)
+    # Recency-Weighted Features (4) - emphasize recent behavior
+    'recent_activity_ratio',       # Recent 30 days vs historical average
+    'recent_volatility_ratio',     # Recent CV vs historical CV
+    'recency_concentration',       # Fraction of activity in last 30 days
+    'momentum_score',              # Exponentially-weighted trend
+    # Distribution Shape Features (4) - higher-order statistics
+    'download_skewness',           # Skewness of daily download distribution
+    'download_kurtosis',           # Kurtosis (tail heaviness)
+    'tail_heaviness_ratio',        # Extreme values / median
+    'zero_day_ratio',              # Fraction of days with no activity
+    # Bot Signature Temporal Features (3) - distinguish bots from humans
+    'autocorrelation_lag1',        # Day-to-day correlation (bots=high, humans=low)
+    'circadian_deviation',         # Distance from human circadian rhythm
+    'request_timing_entropy',      # Entropy of request timing (bots=low, humans=moderate)
 ]
 
 # You can add other configurable parameters here as well, e.g.:
@@ -208,10 +285,11 @@ def get_classification_config() -> dict:
 def get_hub_protection_rules() -> dict:
     """Get hub protection rules from config."""
     return get_classification_config().get('hub_protection', {
-        'high_dl_per_user': {'min_downloads_per_user': 500},
+        'high_dl_per_user': {'min_downloads_per_user': 500, 'max_users': 200},
         'few_users_high_dl': {'max_users': 100, 'min_downloads_per_user': 100},
         'single_user': {'max_users': 1, 'min_downloads_per_user': 50},
         'very_few_users': {'max_users': 10, 'min_downloads_per_user': 200},
+        'behavioral_exclusion': {'max_working_hours_ratio': 0.1, 'min_night_activity_ratio': 0.7},
     })
 
 
@@ -239,7 +317,7 @@ def get_bot_detection_rules() -> dict:
 def get_download_hub_thresholds() -> dict:
     """Get download hub thresholds from config."""
     return get_classification_config().get('download_hub', {
-        'definite': {'min_downloads_per_user': 1000},
+        'definite': {'min_downloads_per_user': 1000, 'max_users': 200},
         'standard': {'min_downloads_per_user': 500, 'max_users': 100},
     })
 
@@ -307,6 +385,15 @@ def get_category_rules() -> dict:
             'max_downloads_per_user': 20,
             'max_file_diversity_ratio': 0.3,
         },
+    })
+
+
+def get_deep_reconciliation_config() -> dict:
+    """Get deep classification reconciliation configuration."""
+    return APP_CONFIG.get('deep_reconciliation', {
+        'override_threshold': 0.7,
+        'strict_override_threshold': 0.8,
+        'prior_sigmoid_steepness': 5.0,
     })
 
 

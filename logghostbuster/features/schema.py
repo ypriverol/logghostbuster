@@ -20,6 +20,7 @@ class LogSchema:
     # User/entity fields
     user_field: str = "user"
     project_field: Optional[str] = "accession"  # Optional, can be None for logs without projects
+    method_field: Optional[str] = None  # Download protocol field (e.g., http, ftp, aspera)
     
     # Temporal fields
     timestamp_field: str = "timestamp"
@@ -43,6 +44,7 @@ class LogSchema:
             "city_field": self.city_field,
             "user_field": self.user_field,
             "project_field": self.project_field,
+            "method_field": self.method_field,
             "timestamp_field": self.timestamp_field,
             "year_field": self.year_field,
             "min_location_downloads": self.min_location_downloads,

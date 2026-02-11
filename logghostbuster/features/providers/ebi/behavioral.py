@@ -597,6 +597,459 @@ def add_bot_interaction_features(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
+def extract_timing_precision_features(
+    df: pd.DataFrame,
+    input_parquet: str,
+    conn,
+    schema=None
+) -> pd.DataFrame:
+    """
+    Extract features that detect mechanical/scheduled bot timing patterns.
+
+    These features capture timing precision that distinguishes bots from humans:
+    - Bots often operate on fixed schedules (every 60s, on round seconds)
+    - Bots may lack sub-second timestamp precision
+    - Bots have very regular intervals between requests
+
+    Features computed:
+    - request_interval_mode: Most common interval between requests
+    - round_second_ratio: Fraction of requests on round seconds (:00, :15, :30, :45)
+    - millisecond_variance: Variance of millisecond component
+    - interval_entropy: Entropy of interval distribution
+
+    Args:
+        df: DataFrame with basic location features
+        input_parquet: Path to input parquet file
+        conn: DuckDB connection
+        schema: LogSchema for field mappings
+
+    Returns:
+        DataFrame with timing precision features added
+    """
+    if schema is None:
+        schema = EBI_SCHEMA
+
+    escaped_path = input_parquet.replace("'", "''")
+
+    logger.info("  Extracting timing precision features...")
+
+    # Query for timing precision analysis
+    timing_query = f"""
+    WITH sampled_downloads AS (
+        SELECT
+            {schema.location_field} as geo_location,
+            CAST({schema.timestamp_field} AS TIMESTAMP) as ts,
+            ROW_NUMBER() OVER (PARTITION BY {schema.location_field} ORDER BY RANDOM()) as rn
+        FROM read_parquet('{escaped_path}')
+        WHERE {schema.location_field} IS NOT NULL
+        AND {schema.timestamp_field} IS NOT NULL
+    ),
+    limited_downloads AS (
+        SELECT geo_location, ts
+        FROM sampled_downloads
+        WHERE rn <= 100  -- Sample for efficiency
+    ),
+    timing_analysis AS (
+        SELECT
+            geo_location,
+            ts,
+            EXTRACT(SECOND FROM ts) as second_of_minute,
+            EXTRACT(MILLISECOND FROM ts) as millisecond,
+            EPOCH(ts - LAG(ts) OVER (PARTITION BY geo_location ORDER BY ts)) as interval_seconds
+        FROM limited_downloads
+    ),
+    interval_stats AS (
+        SELECT
+            geo_location,
+            -- Mode approximation: most common rounded interval
+            MODE(ROUND(interval_seconds / 10) * 10) as interval_mode_10s,
+            -- Round second detection (:00, :15, :30, :45)
+            AVG(CASE
+                WHEN second_of_minute IN (0, 15, 30, 45) THEN 1.0
+                ELSE 0.0
+            END) as round_second_ratio,
+            -- Millisecond variance (0 means no sub-second precision)
+            VARIANCE(millisecond) as millisecond_variance,
+            -- Interval statistics for entropy
+            AVG(interval_seconds) as mean_interval,
+            STDDEV(interval_seconds) as std_interval,
+            COUNT(*) as sample_count
+        FROM timing_analysis
+        WHERE interval_seconds IS NOT NULL
+        AND interval_seconds > 0
+        AND interval_seconds < 86400  -- Filter out > 1 day gaps
+        GROUP BY geo_location
+    )
+    SELECT
+        geo_location,
+        COALESCE(interval_mode_10s, 0) as request_interval_mode,
+        COALESCE(round_second_ratio, 0.25) as round_second_ratio,
+        COALESCE(millisecond_variance, 250000) as millisecond_variance,
+        -- Entropy approximation: CV-based (lower CV = lower entropy = more mechanical)
+        CASE
+            WHEN mean_interval > 0 AND std_interval IS NOT NULL
+            THEN LOG2(GREATEST(std_interval / mean_interval + 1, 1))
+            ELSE 1.0
+        END as interval_entropy
+    FROM interval_stats
+    WHERE sample_count >= 5
+    """
+
+    try:
+        timing_df = conn.execute(timing_query).df()
+        df = df.merge(timing_df, on='geo_location', how='left')
+
+        # Fill defaults for locations without timing data
+        df['request_interval_mode'] = df['request_interval_mode'].fillna(0)
+        df['round_second_ratio'] = df['round_second_ratio'].fillna(0.25)  # Random baseline
+        df['millisecond_variance'] = df['millisecond_variance'].fillna(250000)  # High variance = random
+        df['interval_entropy'] = df['interval_entropy'].fillna(1.0)
+
+        logger.info(f"    ✓ Timing precision features extracted for {len(timing_df)} locations")
+    except Exception as e:
+        logger.warning(f"    ✗ Timing precision extraction failed: {e}")
+        df['request_interval_mode'] = 0
+        df['round_second_ratio'] = 0.25
+        df['millisecond_variance'] = 250000
+        df['interval_entropy'] = 1.0
+
+    return df
+
+
+def extract_user_distribution_features(
+    df: pd.DataFrame,
+    input_parquet: str,
+    conn,
+    schema=None
+) -> pd.DataFrame:
+    """
+    Extract features that detect bot farms vs legitimate users.
+
+    Bot farms create many fake users with similar behavior patterns.
+    Legitimate usage shows natural diversity in user download patterns.
+
+    Features computed:
+    - user_entropy: Shannon entropy of downloads across users
+    - user_gini_coefficient: Gini coefficient of download distribution
+    - single_download_user_ratio: Fraction of users with only 1 download
+    - power_user_ratio: Fraction of downloads from top 10% users
+
+    Args:
+        df: DataFrame with basic location features
+        input_parquet: Path to input parquet file
+        conn: DuckDB connection
+        schema: LogSchema for field mappings
+
+    Returns:
+        DataFrame with user distribution features added
+    """
+    if schema is None:
+        schema = EBI_SCHEMA
+
+    escaped_path = input_parquet.replace("'", "''")
+
+    logger.info("  Extracting user distribution features...")
+
+    user_dist_query = f"""
+    WITH user_downloads AS (
+        SELECT
+            {schema.location_field} as geo_location,
+            {schema.user_field} as user_id,
+            COUNT(*) as download_count
+        FROM read_parquet('{escaped_path}')
+        WHERE {schema.location_field} IS NOT NULL
+        AND {schema.user_field} IS NOT NULL
+        GROUP BY 1, 2
+    ),
+    location_stats AS (
+        SELECT
+            geo_location,
+            COUNT(DISTINCT user_id) as total_users,
+            SUM(download_count) as total_downloads,
+            -- Single download users
+            SUM(CASE WHEN download_count = 1 THEN 1 ELSE 0 END) as single_dl_users,
+            -- For Gini: we need sorted cumulative sums
+            ARRAY_AGG(download_count ORDER BY download_count) as sorted_downloads
+        FROM user_downloads
+        GROUP BY geo_location
+    ),
+    entropy_calc AS (
+        SELECT
+            ud.geo_location,
+            -- Shannon entropy
+            -SUM(
+                (ud.download_count::FLOAT / ls.total_downloads) *
+                LOG2(ud.download_count::FLOAT / ls.total_downloads + 1e-10)
+            ) as user_entropy
+        FROM user_downloads ud
+        JOIN location_stats ls ON ud.geo_location = ls.geo_location
+        WHERE ls.total_downloads > 0
+        GROUP BY ud.geo_location
+    ),
+    power_user_calc AS (
+        SELECT
+            geo_location,
+            -- Top 10% users contribution
+            SUM(CASE
+                WHEN user_rank <= GREATEST(total_users * 0.1, 1)
+                THEN download_count
+                ELSE 0
+            END)::FLOAT / SUM(download_count) as power_user_ratio
+        FROM (
+            SELECT
+                geo_location,
+                download_count,
+                total_users,
+                ROW_NUMBER() OVER (PARTITION BY geo_location ORDER BY download_count DESC) as user_rank
+            FROM user_downloads ud
+            JOIN location_stats ls USING (geo_location)
+        )
+        GROUP BY geo_location
+    )
+    SELECT
+        ls.geo_location,
+        COALESCE(ec.user_entropy, 0) as user_entropy,
+        ls.single_dl_users::FLOAT / NULLIF(ls.total_users, 0) as single_download_user_ratio,
+        COALESCE(pc.power_user_ratio, 1.0) as power_user_ratio,
+        ls.total_users,
+        ls.sorted_downloads
+    FROM location_stats ls
+    LEFT JOIN entropy_calc ec ON ls.geo_location = ec.geo_location
+    LEFT JOIN power_user_calc pc ON ls.geo_location = pc.geo_location
+    """
+
+    try:
+        user_dist_df = conn.execute(user_dist_query).df()
+
+        # Calculate Gini coefficient from sorted downloads
+        def calculate_gini(sorted_downloads):
+            """Calculate Gini coefficient from sorted download counts."""
+            if sorted_downloads is None or len(sorted_downloads) < 2:
+                return 0.5
+            arr = np.array(sorted_downloads, dtype=float)
+            if arr.sum() == 0:
+                return 0.5
+            n = len(arr)
+            indices = np.arange(1, n + 1)
+            return (2 * np.sum(indices * arr) / (n * np.sum(arr))) - (n + 1) / n
+
+        user_dist_df['user_gini_coefficient'] = user_dist_df['sorted_downloads'].apply(calculate_gini)
+
+        # Merge with main df
+        df = df.merge(
+            user_dist_df[['geo_location', 'user_entropy', 'single_download_user_ratio',
+                          'power_user_ratio', 'user_gini_coefficient']],
+            on='geo_location',
+            how='left'
+        )
+
+        # Fill defaults
+        df['user_entropy'] = df['user_entropy'].fillna(0)
+        df['user_gini_coefficient'] = df['user_gini_coefficient'].fillna(0.5)
+        df['single_download_user_ratio'] = df['single_download_user_ratio'].fillna(0.5)
+        df['power_user_ratio'] = df['power_user_ratio'].fillna(0.5)
+
+        logger.info(f"    ✓ User distribution features extracted for {len(user_dist_df)} locations")
+    except Exception as e:
+        logger.warning(f"    ✗ User distribution extraction failed: {e}")
+        df['user_entropy'] = 0
+        df['user_gini_coefficient'] = 0.5
+        df['single_download_user_ratio'] = 0.5
+        df['power_user_ratio'] = 0.5
+
+    return df
+
+
+def extract_session_behavior_features(
+    df: pd.DataFrame,
+    input_parquet: str,
+    conn,
+    schema=None
+) -> pd.DataFrame:
+    """
+    Extract features that distinguish human browsing sessions from bot sessions.
+
+    Human sessions have natural variation in duration, timing, and intensity.
+    Bot sessions are often mechanically consistent.
+
+    Features computed:
+    - session_duration_cv: Coefficient of variation of session lengths
+    - inter_session_regularity: Regularity of gaps between sessions
+    - downloads_per_session_cv: CV of downloads per session
+    - session_start_hour_entropy: Entropy of session start times
+
+    Args:
+        df: DataFrame with basic location features
+        input_parquet: Path to input parquet file
+        conn: DuckDB connection
+        schema: LogSchema for field mappings
+
+    Returns:
+        DataFrame with session behavior features added
+    """
+    if schema is None:
+        schema = EBI_SCHEMA
+
+    escaped_path = input_parquet.replace("'", "''")
+
+    logger.info("  Extracting session behavior features...")
+
+    # Session detection with 30-minute gap threshold
+    session_query = f"""
+    WITH ordered_downloads AS (
+        SELECT
+            {schema.location_field} as geo_location,
+            CAST({schema.timestamp_field} AS TIMESTAMP) as ts,
+            LAG(CAST({schema.timestamp_field} AS TIMESTAMP))
+                OVER (PARTITION BY {schema.location_field} ORDER BY {schema.timestamp_field}) as prev_ts
+        FROM read_parquet('{escaped_path}')
+        WHERE {schema.location_field} IS NOT NULL
+        AND {schema.timestamp_field} IS NOT NULL
+    ),
+    session_markers AS (
+        SELECT
+            geo_location,
+            ts,
+            EXTRACT(HOUR FROM ts) as start_hour,
+            CASE
+                WHEN prev_ts IS NULL OR EPOCH(ts - prev_ts) > 1800
+                THEN 1
+                ELSE 0
+            END as is_session_start,
+            CASE
+                WHEN prev_ts IS NOT NULL AND EPOCH(ts - prev_ts) > 1800
+                THEN EPOCH(ts - prev_ts)
+                ELSE NULL
+            END as inter_session_gap
+        FROM ordered_downloads
+    ),
+    sessions AS (
+        SELECT
+            geo_location,
+            ts,
+            start_hour,
+            inter_session_gap,
+            SUM(is_session_start) OVER (
+                PARTITION BY geo_location
+                ORDER BY ts
+            ) as session_id
+        FROM session_markers
+    ),
+    session_stats AS (
+        SELECT
+            geo_location,
+            session_id,
+            MIN(start_hour) as session_start_hour,
+            COUNT(*) as downloads_in_session,
+            EPOCH(MAX(ts) - MIN(ts)) as session_duration_seconds
+        FROM sessions
+        GROUP BY geo_location, session_id
+    ),
+    location_session_stats AS (
+        SELECT
+            geo_location,
+            -- Session duration CV
+            CASE
+                WHEN AVG(session_duration_seconds) > 0
+                THEN STDDEV(session_duration_seconds) / AVG(session_duration_seconds)
+                ELSE 0
+            END as session_duration_cv,
+            -- Downloads per session CV
+            CASE
+                WHEN AVG(downloads_in_session) > 0
+                THEN STDDEV(downloads_in_session) / AVG(downloads_in_session)
+                ELSE 0
+            END as downloads_per_session_cv,
+            -- Session count
+            COUNT(*) as num_sessions
+        FROM session_stats
+        GROUP BY geo_location
+    ),
+    inter_session_stats AS (
+        SELECT
+            geo_location,
+            -- Inter-session regularity (1 / CV of gaps)
+            CASE
+                WHEN STDDEV(inter_session_gap) > 0
+                THEN AVG(inter_session_gap) / STDDEV(inter_session_gap)
+                ELSE 0
+            END as inter_session_regularity
+        FROM session_markers
+        WHERE inter_session_gap IS NOT NULL
+        GROUP BY geo_location
+    ),
+    hour_entropy AS (
+        SELECT
+            geo_location,
+            -- Entropy of session start hours
+            -SUM(
+                (hour_count::FLOAT / total_sessions) *
+                LOG2(hour_count::FLOAT / total_sessions + 1e-10)
+            ) as session_start_hour_entropy
+        FROM (
+            SELECT
+                geo_location,
+                session_start_hour,
+                COUNT(*) as hour_count,
+                SUM(COUNT(*)) OVER (PARTITION BY geo_location) as total_sessions
+            FROM session_stats
+            GROUP BY geo_location, session_start_hour
+        )
+        GROUP BY geo_location
+    )
+    SELECT
+        lss.geo_location,
+        COALESCE(lss.session_duration_cv, 0) as session_duration_cv,
+        COALESCE(iss.inter_session_regularity, 0) as inter_session_regularity,
+        COALESCE(lss.downloads_per_session_cv, 0) as downloads_per_session_cv,
+        COALESCE(he.session_start_hour_entropy, 0) as session_start_hour_entropy
+    FROM location_session_stats lss
+    LEFT JOIN inter_session_stats iss ON lss.geo_location = iss.geo_location
+    LEFT JOIN hour_entropy he ON lss.geo_location = he.geo_location
+    WHERE lss.num_sessions >= 2
+    """
+
+    try:
+        session_df = conn.execute(session_query).df()
+        df = df.merge(session_df, on='geo_location', how='left')
+
+        # Fill defaults
+        df['session_duration_cv'] = df['session_duration_cv'].fillna(1.0)  # High CV = varied
+        df['inter_session_regularity'] = df['inter_session_regularity'].fillna(0)
+        df['downloads_per_session_cv'] = df['downloads_per_session_cv'].fillna(1.0)
+        df['session_start_hour_entropy'] = df['session_start_hour_entropy'].fillna(2.0)  # Moderate entropy
+
+        logger.info(f"    ✓ Session behavior features extracted for {len(session_df)} locations")
+    except Exception as e:
+        logger.warning(f"    ✗ Session behavior extraction failed: {e}")
+        df['session_duration_cv'] = 1.0
+        df['inter_session_regularity'] = 0
+        df['downloads_per_session_cv'] = 1.0
+        df['session_start_hour_entropy'] = 2.0
+
+    return df
+
+
+# List of new timing/session features for reference
+NEW_BEHAVIORAL_FEATURES = [
+    # Timing precision features
+    'request_interval_mode',
+    'round_second_ratio',
+    'millisecond_variance',
+    'interval_entropy',
+    # User distribution features
+    'user_entropy',
+    'user_gini_coefficient',
+    'single_download_user_ratio',
+    'power_user_ratio',
+    # Session behavior features
+    'session_duration_cv',
+    'inter_session_regularity',
+    'downloads_per_session_cv',
+    'session_start_hour_entropy',
+]
+
+
 def add_bot_signature_features(df: pd.DataFrame) -> pd.DataFrame:
     """
     Add discriminative bot signature features.

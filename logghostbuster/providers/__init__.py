@@ -1,4 +1,4 @@
-"""Provider management for LogGhostbuster.
+"""Provider management for DeepLogBot.
 
 This module manages provider-specific configurations, schemas, and classification rules.
 

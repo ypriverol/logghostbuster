@@ -8,14 +8,13 @@
 \usepackage{booktabs}
 \usepackage{multirow}
 \usepackage{xcolor}
+\usepackage[hyphens]{url}
 \usepackage{hyperref}
-\usepackage{algorithm}
-\usepackage{algpseudocode}
-\usepackage{listings}
+\expandafter\def\expandafter\UrlBreaks\expandafter{\UrlBreaks\do\/\do-\do_}
 \usepackage{tikz}
 \usetikzlibrary{shapes,arrows,positioning,fit,backgrounds}
 \usepackage[margin=1in]{geometry}
-\usepackage{natbib}
+\usepackage[numbers,sort&compress]{natbib}
 \usepackage{subcaption}
 \usepackage{float}
 
@@ -25,24 +24,15 @@
 \definecolor{organicgreen}{RGB}{46,204,113}
 \definecolor{automatedorange}{RGB}{230,126,34}
 
-% Code listing style
-\lstset{
-    basicstyle=\ttfamily\small,
-    breaklines=true,
-    frame=single,
-    backgroundcolor=\color{gray!10},
-    keywordstyle=\color{blue},
-    commentstyle=\color{green!60!black},
-    stringstyle=\color{red!60!black}
-}
-
 % Title
-\title{\textbf{LogGhostbuster: A Hybrid Machine Learning System for Bot Detection and Download Pattern Classification in Scientific Repository Logs}}
+\title{\textbf{Tracking Dataset Reuse in Proteomics: A Comprehensive Analysis of PRIDE Archive Downloads}}
 
 \author{
-    Yasset Perez-Riverol$^{1,*}$\\
+    Suresh Hewapathirana$^{1}$, Jingwen Bai$^{1}$, Chakradhar Bandla$^{1}$,\\
+    Selvakumar Kamatchinathan$^{1}$, Deepti J Kundu$^{1}$, Nithu Sara John$^{1}$,\\
+    Marc Riera Duocastella$^{1}$, Juan Antonio Vizca\'{i}no$^{1}$, Yasset Perez-Riverol$^{1,*}$\\[0.5em]
     \small $^{1}$European Molecular Biology Laboratory, European Bioinformatics Institute (EMBL-EBI),\\
-    \small Wellcome Genome Campus, Hinxton, Cambridge CB10 1SD, UK\\
+    \small Wellcome Trust Genome Campus, Hinxton, Cambridge CB10 1SD, UK\\
     \small $^{*}$Corresponding author: yperez@ebi.ac.uk
 }
 
@@ -54,494 +44,192 @@
 
 % Abstract
 \begin{abstract}
-\textbf{Motivation:} Scientific data repositories face increasing challenges from automated bot traffic that inflates download statistics, affects resource allocation decisions, and obscures genuine usage patterns. Distinguishing between legitimate automated access (mirrors, CI/CD pipelines) and malicious bots (scrapers, crawlers) requires sophisticated analysis of behavioral patterns that simple rule-based systems cannot capture.
+Understanding how scientific datasets are accessed and reused is essential for resource planning, impact assessment, and the evaluation of open science policies. Here we present the PRIDE Archive download tracking infrastructure and a comprehensive analysis of download records from the PRIDE proteomics database (2020-2025), spanning 34,085 datasets accessed from 213 countries. The infrastructure includes \texttt{nf-downloadstats}, a scalable Nextflow pipeline for processing large-scale download logs, and DeepLogBot, a deep-learning bot detection framework. After removing 88.0\% of download traffic identified as automated, analysis of the remaining 19.1 million genuine downloads reveals that the United States leads PRIDE data reuse (26.8\%), followed by the United Kingdom (23.6\%) and Germany (22.5\%). Downloads grew steadily from 1.2 million in 2021 to 5.8 million in 2025, with FTP and HTTP alternating as the dominant download protocol. Dataset reuse follows a highly concentrated distribution, with the top 1\% of datasets accounting for 43.3\% of all downloads. These findings provide actionable insights for repository infrastructure planning and demonstrate the importance of bot-aware analytics for scientific data resources.
 
-\textbf{Results:} We present LogGhostbuster, a hybrid machine learning system that combines unsupervised anomaly detection with hierarchical classification to identify bot behavior in download logs. The system implements a three-level taxonomy distinguishing organic (human) from automated behavior, and further classifying automated access as either malicious bots or legitimate automation. Using Isolation Forest for anomaly detection and an optional Transformer-based deep architecture for temporal pattern recognition, LogGhostbuster achieves robust classification with configurable rules and provider-agnostic design. Applied to the PRIDE database at EMBL-EBI, the system identified 20,903 bot locations (29.4\% of 71,133 analyzed) responsible for 113.1 million downloads (71.0\% of total), while correctly distinguishing 667 legitimate automation sources including institutional mirrors.
+\begin{sloppypar}
+\noindent\textbf{Availability:} The \texttt{nf-downloadstats} pipeline is available at \url{https://github.com/PRIDE-Archive/nf-downloadstats} and DeepLogBot at \url{https://github.com/ypriverol/deeplogbot}, both under the Apache 2.0 license.
+\end{sloppypar}
 
-\textbf{Availability:} LogGhostbuster is freely available at \url{https://github.com/bigbio/logghostbuster} under the Apache 2.0 license.
-
-\textbf{Keywords:} bot detection, machine learning, anomaly detection, download statistics, scientific repositories
+\noindent\textbf{Keywords:} bot detection, data reuse, download analytics, PRIDE, proteomics
 \end{abstract}
 
+\paragraph{Significance of the Study}
+Accurate download statistics are essential for assessing the impact of open scientific data, guiding infrastructure investments, and informing funding decisions. However, automated bot traffic---which we show accounts for 88.0\% of PRIDE download volume---severely distorts these metrics. This work provides the first large-scale, bot-aware analysis of proteomics data reuse, revealing genuine global usage patterns across 213 countries and 34,085 datasets over five years. The open-source tools we present (\texttt{nf-downloadstats} and DeepLogBot) are directly applicable to other scientific repositories facing similar challenges, enabling reliable usage analytics that support evidence-based resource planning and open science policy evaluation.
+
+% ======================================================================
 \section{Introduction}
+% ======================================================================
 
-Scientific data repositories have become essential infrastructure for research, hosting petabytes of data accessed by millions of users worldwide \citep{Perez2019}. Repositories such as the PRIDE database \citep{Perez-Riverol2022}, the European Nucleotide Archive (ENA) \citep{Leinonen2011}, and UniProt \citep{UniProtConsortium2023} provide critical resources for the scientific community. Understanding how these resources are used is essential for resource allocation, impact assessment, and service improvement.
+The PRIDE (Proteomics Identifications) database is a leading public mass spectrometry-based proteomics data repository \citep{PerezRiverol2025}. As a founding member of the ProteomeXchange consortium, PRIDE enables researchers to share and access high-quality proteomics datasets globally, promoting transparency, reproducibility, and data reuse. Aligned with the FAIR principles---Findable, Accessible, Interoperable, and Reusable \citep{Wilkinson2016} - PRIDE supports open science by ensuring that public datasets are well-annotated and machine-readable. These principles are essential for maximizing the value of shared scientific data.
 
-However, download statistics from scientific repositories are increasingly contaminated by automated bot traffic. Studies have shown that bot traffic can account for 30-70\% of web requests \citep{Imperva2023}, with scientific repositories being particularly attractive targets due to their open access policies and valuable data content. This contamination creates several problems:
+Understanding how public datasets are reused is essential for assessing their scientific impact and informing data-driven policies. While citations in scholarly publications offer one indicator of reuse, download statistics provide a more immediate and granular view of data demand and utility. In our previous work, we demonstrated that usage metrics can serve as complementary indicators of impact, supporting improved data stewardship, resource allocation, and funding decisions \citep{PerezRiverol2019}. Beyond measuring impact, download statistics are critical for designing more effective data infrastructures. Insights into download behavior can inform the optimization of data access protocols, guide the prioritization of metadata curation and visualization features, and identify high-value datasets for targeted annotation or integration efforts \citep{Perez-Riverol2022}. As public data volumes continue to grow, usage-driven strategies become increasingly important for improving dataset discoverability and reuse. For example, frequently downloaded datasets---particularly those used as community benchmarks---could be prioritized for enhanced metadata annotation (e.g., SDRF sample descriptions \citep{Dai2021}) and enriched with curated tags and keywords, making them easier to find through search interfaces. Users could then combine these annotations with download counts to identify the most relevant and community-validated datasets for their analyses. Similarly, repositories can leverage download patterns to allocate faster transfer services and optimized storage for high-demand datasets, ensuring that the most reused data remain readily accessible.
 
-\begin{enumerate}
-    \item \textbf{Inflated metrics}: Download counts used for impact assessment become unreliable when dominated by automated access.
-    \item \textbf{Resource misallocation}: Infrastructure decisions based on apparent demand may not reflect actual user needs.
-    \item \textbf{Obscured patterns}: Genuine usage trends become difficult to identify amid bot noise.
-    \item \textbf{Service degradation}: High-volume automated access can degrade service quality for human users.
-\end{enumerate}
+Despite their importance, systematic tracking of dataset downloads remains a major challenge across PRIDE and other ProteomeXchange resources. Barriers include the absence of a standardized infrastructure for logging access events, technical complexities in aggregating usage data across distributed and heterogeneous transfer systems (e.g., FTP, HTTP, Aspera, Globus), and ongoing concerns related to user privacy and data protection. Compounding these challenges, automated bot traffic contaminates download statistics---studies estimate that bots account for 30--70\% of all internet traffic \citep{Imperva2023}, and scientific repositories are particularly attractive targets due to their open-access policies and valuable content \citep{Orr2025}. Without accounting for this contamination, any analysis of repository usage risks drawing conclusions from inflated and distorted metrics. As bioinformatics resources continue to scale in both size and complexity, robust download analytics will become increasingly vital - not only for measuring impact - but also for enabling smarter, user-informed development of open data platforms.
 
-Distinguishing bot traffic from human access is challenging because not all automated access is problematic. Legitimate automation includes institutional mirrors that improve global access, continuous integration pipelines that test software against repository data, and data aggregation services that provide valuable meta-analyses. A successful bot detection system must therefore implement a nuanced classification that distinguishes malicious from legitimate automation.
+\begin{sloppypar}
+Here, we present the PRIDE Archive downloads infrastructure, which includes \texttt{nf-downloadstats}, a large-scale Nextflow \citep{DiTommaso2017} workflow for processing extensive traffic logs, and DeepLogBot, a bot detection framework that implements two complementary algorithms to identify and remove automated traffic. Additionally, we have developed an infrastructure that integrates download statistics directly into the PRIDE Archive interface, allowing users to sort datasets by total downloads---both raw and normalized by file count---and perform percentile-based analyses. Using these tools on 159.3 million download records from 2020 to 2025, we characterize global proteomics data reuse patterns, examining geographic distribution across countries and regions, temporal evolution of download activity, shifts in download protocol preferences, and the concentration of dataset reuse across the PRIDE collection. The workflow and resulting data are open-source and can be used by research labs and data depositors in grant reports and publications.
+\end{sloppypar}
 
-Existing approaches to bot detection typically fall into two categories: signature-based methods that identify known bot user agents and IP ranges, and behavioral analysis that identifies bot-like access patterns \citep{Jonker2019}. Signature-based methods suffer from easy circumvention through user agent spoofing, while simple behavioral rules miss sophisticated bots that mimic human patterns. Machine learning approaches have shown promise \citep{Rovetta2020}, but most focus on web security rather than scientific repository contexts where different patterns prevail.
-
-In this paper, we present LogGhostbuster, a hybrid machine learning system specifically designed for bot detection in scientific repository download logs. Our contributions include:
-
-\begin{itemize}
-    \item A \textbf{hierarchical classification taxonomy} that distinguishes organic (human-like) from automated behavior, and further classifies automated access as malicious bots or legitimate automation.
-    \item A \textbf{hybrid detection architecture} combining Isolation Forest anomaly detection with rule-based and optional deep learning classification.
-    \item A \textbf{provider-agnostic design} that supports different log formats through configurable schema mappings and extensible feature extraction.
-    \item \textbf{Comprehensive evaluation} on real-world data from the PRIDE proteomics database, demonstrating the system's effectiveness in a production environment.
-\end{itemize}
-
-\section{Background}
-
-\subsection{Bot Detection Challenges}
-
-Bot detection in web traffic has been extensively studied in the security community \citep{Iliou2021}. Traditional approaches include:
-
-\textbf{Signature-based detection} relies on matching known bot signatures such as user agent strings, IP address ranges, or access patterns. While effective against unsophisticated bots, these methods fail against bots that spoof legitimate user agents or use residential proxies \citep{Jonker2019}.
-
-\textbf{Behavioral analysis} examines access patterns to identify non-human behavior. Metrics such as request rate, session duration, and navigation patterns can distinguish bots from humans \citep{Rovetta2020}. However, sophisticated bots increasingly mimic human behavior, reducing the effectiveness of simple rules.
-
-\textbf{Machine learning approaches} have shown promise in capturing complex patterns that simple rules miss. Both supervised \citep{Cabri2021} and unsupervised \citep{Habibi2020} methods have been applied, with ensemble approaches often achieving the best results.
-
-\subsection{Scientific Repository Context}
-
-Bot detection in scientific repositories presents unique challenges:
-
-\begin{enumerate}
-    \item \textbf{Legitimate automation}: Unlike e-commerce sites where automation is generally unwanted, scientific repositories benefit from mirrors, aggregators, and automated pipelines.
-    \item \textbf{Download-centric patterns}: Scientific repositories primarily serve file downloads rather than page views, requiring different feature engineering.
-    \item \textbf{Long-term patterns}: Bot campaigns against repositories may span months or years, requiring temporal analysis across extended periods.
-    \item \textbf{Geographic distribution}: Global scientific collaboration means legitimate access comes from diverse locations, making geographic filtering problematic.
-\end{enumerate}
-
-\subsection{Isolation Forest}
-
-Isolation Forest \citep{Liu2008} is an unsupervised anomaly detection algorithm particularly suited to high-dimensional data. Unlike distance-based methods, Isolation Forest identifies anomalies by their susceptibility to isolation through random partitioning.
-
-The algorithm constructs an ensemble of isolation trees, each built by recursively partitioning the data using random feature selections and split points. Anomalies, being rare and different, require fewer partitions to isolate and thus have shorter average path lengths in the trees.
-
-For a data point $x$, the anomaly score is computed as:
-\begin{equation}
-    s(x, n) = 2^{-\frac{E(h(x))}{c(n)}}
-\end{equation}
-where $E(h(x))$ is the expected path length of $x$ across all trees, $n$ is the sample size, and $c(n)$ is a normalization factor.
-
-Isolation Forest has several advantages for our application:
-\begin{itemize}
-    \item No assumption about the distribution of normal data
-    \item Linear time complexity O($n \log n$)
-    \item Effective in high-dimensional spaces
-    \item Robust to irrelevant features
-\end{itemize}
-
+% ======================================================================
 \section{Methods}
+% ======================================================================
 
-\subsection{System Architecture}
+\subsection{PRIDE Download Logs}
 
-LogGhostbuster implements a multi-stage pipeline (Figure~\ref{fig:architecture}) comprising:
+Download logs are stored in a secure file system as compressed, comma-delimited text files. Each log entry includes a timestamp, dataset accession, filename, anonymized and non-reversible IP hash, download status, user country, download protocol (Globus, HTTP, Aspera, FTP), and dataset type. No personal or directly identifiable user data is stored. Log files are organized hierarchically by Protocol, Public/Private access, Year, Month, and Day. Individual log files can be large, ranging from 1~GB to 237~GB (Supplementary Notes Section~S1).
 
-\begin{enumerate}
-    \item \textbf{Data Ingestion}: Memory-efficient loading and optional sampling of Parquet files via DuckDB.
-    \item \textbf{Feature Extraction}: Computation of 60+ behavioral features at the location (IP/geo) level.
-    \item \textbf{Anomaly Detection}: Isolation Forest identifies statistically unusual access patterns.
-    \item \textbf{Classification}: Hierarchical classification using rules or deep learning.
-    \item \textbf{Reporting}: Generation of annotated data and comprehensive reports.
-\end{enumerate}
+\subsection{nf-downloadstats: Log Processing Pipeline}
 
-\begin{figure}[H]
-\centering
-\begin{tikzpicture}[
-    node distance=1.2cm,
-    block/.style={rectangle, draw, fill=blue!10, text width=8cm, text centered, rounded corners, minimum height=1cm},
-    decision/.style={diamond, draw, fill=green!10, text width=2.5cm, text centered, aspect=2},
-    arrow/.style={->, >=stealth, thick}
-]
+\begin{sloppypar}
+Due to the large volume and size of download log files, we developed \texttt{nf-downloadstats} (\url{https://github.com/PRIDE-Archive/nf-downloadstats}), an open-source Nextflow workflow for large-scale processing of the original anonymized log files (Figure~\ref{fig:bot_overview}A). Each processing step is implemented as an independent Python module, performing tasks such as removing incomplete transfers and filtering for PRIDE-specific records. A custom log file parser addresses the heterogeneity and scale of download log data; due to inconsistencies in log entries such as variable column structures and incomplete records, additional filters retain only complete transfers associated with PRIDE datasets.
+\end{sloppypar}
 
-% Nodes
-\node[block] (input) {Input: Parquet Log Files\\(DuckDB-optimized loading)};
-\node[block, below=of input] (features) {Feature Extraction\\(60+ behavioral features per location)};
-\node[block, below=of features] (anomaly) {Anomaly Detection\\(Isolation Forest, contamination=15\%)};
-\node[decision, below=of anomaly] (method) {Method?};
-\node[block, below left=1cm and 1cm of method, text width=4cm] (rules) {Rules-Based\\Classification};
-\node[block, below right=1cm and 1cm of method, text width=4cm] (deep) {Deep Architecture\\(Transformer)};
-\node[block, below=2.5cm of method] (hier) {Hierarchical Classification\\Level 1: Organic vs Automated\\Level 2: Bot vs Legitimate Automation\\Level 3: Detailed Subcategories};
-\node[block, below=of hier] (output) {Output: Annotated Data + Reports};
+To efficiently process the large volume of log files, parallelization is employed using a high-performance computing (HPC) environment managed via Slurm. Log files are processed in batches, with batch sizes and filtering criteria defined in a user-friendly YAML configuration file. The output is a consolidated 4.7~GB Parquet file containing 159,327,635 individual download records spanning January 2020 through January 2025. Each record includes the download date, geographic location (derived from IP geolocation), country, dataset accession, filename, download method (protocol), and an anonymized user identifier. The data covers 35,528 unique dataset accessions accessed from 235 countries.
 
-% Arrows
-\draw[arrow] (input) -- (features);
-\draw[arrow] (features) -- (anomaly);
-\draw[arrow] (anomaly) -- (method);
-\draw[arrow] (method) -| node[above, pos=0.3] {rules} (rules);
-\draw[arrow] (method) -| node[above, pos=0.3] {deep} (deep);
-\draw[arrow] (rules) |- (hier);
-\draw[arrow] (deep) |- (hier);
-\draw[arrow] (hier) -- (output);
+\subsection{Dataset Aggregation}
 
-\end{tikzpicture}
-\caption{LogGhostbuster system architecture showing the multi-stage pipeline from data ingestion through classification and reporting.}
-\label{fig:architecture}
-\end{figure}
+For analysis, individual download events are aggregated at the \textit{location} level, where each location represents a unique geographic coordinate. This aggregation produces 71,133 location profiles, each characterized by behavioral features including download volume, user counts, temporal patterns, and access characteristics.
 
-\subsection{Feature Extraction}
+\subsection{Bot Detection Framework}
 
-Features are computed at the \textit{location} level, where a location represents a unique geographic origin (typically derived from IP geolocation). This aggregation reduces millions of individual download events to thousands of location profiles, making analysis tractable while preserving behavioral patterns.
+We implemented two complementary bot detection algorithms, each combining Isolation Forest anomaly detection \citep{Liu2008} with a distinct classification strategy. Both methods share a common feature extraction pipeline that computes 60+ behavioral features per location, organized into four categories: activity features (download counts, user statistics), temporal features (hourly/yearly entropy, working hours ratio), behavioral features (burst patterns, circadian deviation, coordination scores), and discriminative features (file exploration patterns, user authenticity scores). Full feature descriptions are provided in Supplementary Notes Section~S3.
 
-\subsubsection{Basic Activity Features}
+The \textit{rule-based} method applies YAML-configurable threshold patterns organized in a three-level hierarchy: (1) behavior type (organic vs.\ automated), (2) automation category (bot vs.\ legitimate automation), and (3) detailed subcategory (e.g., scraper, mirror, research group). Patterns are evaluated sequentially, with the first match determining classification. This approach prioritizes interpretability and configurability. The \textit{deep} method augments rule-based classification with additional behavioral feature engineering, including bot interaction features (download concentration, temporal irregularity, composite bot score) and bot signature features (request velocity, access regularity, session anomaly patterns). These 40+ additional features enable more nuanced separation of bot subtypes and borderline cases. The method also incorporates a two-stage classification pipeline: Stage~1 separates organic from automated traffic, and Stage~2 distinguishes malicious bots from legitimate automation using a discriminative scoring system with behavioral validation and dataset breadth checks to identify scraper patterns.
 
-\begin{itemize}
-    \item \texttt{unique\_users}: Number of distinct user identifiers from this location
-    \item \texttt{downloads\_per\_user}: Ratio of total downloads to unique users
-    \item \texttt{total\_downloads}: Aggregate download count
-    \item \texttt{projects\_per\_user}: Diversity of accessed resources
-\end{itemize}
+To evaluate both algorithms, we constructed a ground truth dataset of 1,411 labeled locations (88 bots, 44 hubs, 1,279 organic) using high-confidence heuristic criteria (Supplementary Notes Section~S5). Both methods were evaluated on a 1-million record sample; we computed precision, recall, and F1 score per category, with 1,000-iteration bootstrap confidence intervals for the macro F1. The Deep method achieves the highest macro F1 score (0.775, 95\% CI: 0.731--0.818), with perfect bot recall (1.000) and strong hub detection (F1 = 0.718), while the Rules method provides higher bot precision (0.506) but detects fewer hubs (F1 = 0.275). Inter-method agreement was assessed using Cohen's kappa ($\kappa$ = 0.508), and McNemar's test reveals no significant difference between the two methods ($p = 0.877$). Detailed per-category metrics, bootstrap confidence intervals, and inter-method agreement analyses are provided in Supplementary Notes Section~S6.
 
-\subsubsection{Temporal Features}
-
-Temporal patterns are critical for bot detection, as automated access often exhibits characteristic timing signatures:
-
-\begin{itemize}
-    \item \texttt{hourly\_entropy}: Shannon entropy of hourly download distribution. Bots often show low entropy (concentrated activity) while humans show higher entropy (distributed activity).
-    \item \texttt{working\_hours\_ratio}: Fraction of downloads during business hours (9 AM - 6 PM local time). Human users typically show higher ratios.
-    \item \texttt{night\_activity\_ratio}: Fraction of downloads during night hours. Elevated night activity suggests automated scheduling.
-    \item \texttt{yearly\_entropy}: Distribution of activity across years, detecting sudden spikes.
-    \item \texttt{spike\_ratio}: Ratio of latest year downloads to historical average.
-\end{itemize}
-
-\subsubsection{Behavioral Features (Deep Method)}
-
-Advanced features capture nuanced behavioral patterns:
-
-\begin{itemize}
-    \item \texttt{burst\_pattern\_score}: Detects concentrated download bursts within short time windows.
-    \item \texttt{circadian\_rhythm\_deviation}: Measures deviation from typical human circadian patterns.
-    \item \texttt{user\_coordination\_score}: Identifies synchronized activity across multiple user IDs, suggesting bot farms.
-    \item \texttt{regularity\_score}: Measures temporal regularity, with high values indicating scheduled automation.
-\end{itemize}
-
-\subsubsection{Discriminative Features}
-
-Features designed to distinguish malicious bots from legitimate automation:
-
-\begin{itemize}
-    \item \texttt{file\_exploration\_score}: Breadth of file access (bots often scrape systematically)
-    \item \texttt{file\_mirroring\_score}: Pattern consistency with mirroring behavior
-    \item \texttt{bot\_farm\_score}: User homogeneity suggesting coordinated fake accounts
-    \item \texttt{geographic\_stability}: IP diversity from this location
-    \item \texttt{legitimate\_automation\_score}: Composite score for legitimate automation indicators
-\end{itemize}
-
-\subsection{Hierarchical Classification Taxonomy}
-
-LogGhostbuster implements a three-level classification taxonomy (Figure~\ref{fig:taxonomy}):
+We applied the Deep method---the best-performing algorithm---to the full dataset (Figure~\ref{fig:bot_overview}A), classifying each of the 71,133 locations as bot, hub (legitimate automation), or organic. Locations classified as bot (53.1\%, representing 88.0\% of download traffic) were removed prior to all downstream analyses (Figure~\ref{fig:bot_overview}B; Supplementary Notes Section~S7). The remaining 33,354 non-bot locations (organic users and institutional hubs) account for 19.1 million downloads across 34,085 datasets and 213 countries.
 
 \begin{figure}[H]
 \centering
-\begin{tikzpicture}[
-    level 1/.style={sibling distance=6cm, level distance=2cm},
-    level 2/.style={sibling distance=3cm, level distance=2cm},
-    level 3/.style={sibling distance=2cm, level distance=2cm},
-    every node/.style={draw, rounded corners, align=center, minimum width=2cm},
-    edge from parent/.style={draw, ->, >=stealth}
-]
-
-\node[fill=gray!20] {Behavior Type\\(Level 1)}
-    child {node[fill=organicgreen!30] {ORGANIC}
-        child {node[fill=organicgreen!20, font=\small] {individual\\user}}
-        child {node[fill=organicgreen!20, font=\small] {research\\group}}
-    }
-    child {node[fill=automatedorange!30] {AUTOMATED}
-        child {node[fill=botred!30] {BOT}
-            child {node[fill=botred!20, font=\scriptsize] {scraper}}
-            child {node[fill=botred!20, font=\scriptsize] {crawler}}
-            child {node[fill=botred!20, font=\scriptsize] {coordinated}}
-        }
-        child {node[fill=hubblue!30] {LEGITIMATE\\AUTOMATION}
-            child {node[fill=hubblue!20, font=\scriptsize] {mirror}}
-            child {node[fill=hubblue!20, font=\scriptsize] {CI/CD}}
-            child {node[fill=hubblue!20, font=\scriptsize] {course}}
-        }
-    };
-
-\end{tikzpicture}
-\caption{Three-level hierarchical classification taxonomy. Level 1 distinguishes organic (human-like) from automated behavior. Level 2 classifies automated behavior as malicious bot or legitimate automation. Level 3 provides detailed subcategories.}
-\label{fig:taxonomy}
+\includegraphics[width=\textwidth]{figures/figure_bot_detection_overview.pdf}
+\caption{PRIDE Logs Workflow and classification results. (A) End-to-end pipeline comprising two components: \texttt{nf-downloadstats} (green dashed box) processes raw PRIDE download logs into a consolidated Parquet file, and DeepLogBot (blue dashed box) aggregates records to geographic locations and classifies them via two complementary algorithms (rule-based and deep architecture) using Isolation Forest anomaly detection and hierarchical classification. (B) Download share by classification category on the full dataset: bots account for 88.0\% of all traffic despite representing 53.1\% of locations.}
+\label{fig:bot_overview}
 \end{figure}
 
-Table~\ref{tab:classification_rules} presents the complete hierarchical classification rules organized by level, class, and the specific feature thresholds used for classification.
+\subsection{PRIDE Download Statistics Visualization}
 
-\begin{table}[H]
+The aggregated download statistics produced by \texttt{nf-downloadstats} are stored in MongoDB and Elasticsearch to enable fast searching and visualization within the PRIDE Archive web interface. For each dataset, the total number of downloads is displayed alongside a gradient bar indicating its download percentile, with higher intensity representing datasets in the top 1\% of downloads (Figure~\ref{fig:pride_viz}). Additionally, a yearly trend chart is provided for each dataset, illustrating download activity over time. Datasets can be sorted by both total downloads per project and a normalized metric that accounts for the number of files within each project, enabling users to identify highly reused datasets for benchmarking or reanalysis.
+
+\begin{figure}[H]
 \centering
-\caption{Hierarchical classification rules. Level 1 distinguishes behavior type, Level 2 classifies automation intent, and Level 3 provides detailed subcategories.}
-\label{tab:classification_rules}
-\small
-\begin{tabular}{llp{4.5cm}p{5cm}}
-\toprule
-\textbf{Level} & \textbf{Class} & \textbf{Rules} & \textbf{Description} \\
-\midrule
-\multirow{8}{*}{\rotatebox[origin=c]{90}{\textbf{Level 1}}}
-& \multirow{4}{*}{ORGANIC}
-& \texttt{working\_hours\_ratio} $\geq 0.4$ & \multirow{4}{5cm}{Human-like download patterns with activity during business hours, irregular timing, and limited user counts} \\
-& & \texttt{regularity\_score} $\leq 0.6$ & \\
-& & \texttt{interval\_cv} $\geq 0.7$ & \\
-& & \texttt{unique\_users} $< 50$ & \\
-\cmidrule{2-4}
-& \multirow{4}{*}{AUTOMATED}
-& \texttt{regularity\_score} $\geq 0.7$ & \multirow{4}{5cm}{Programmatic access with high temporal regularity, non-working hours activity, or coordinated multi-user patterns} \\
-& & \texttt{night\_activity\_ratio} $\geq 0.35$ & \\
-& & \texttt{user\_coordination\_score} $\geq 0.6$ & \\
-& & \texttt{downloads\_per\_user} $\geq 500$ & \\
-\midrule
-\multirow{8}{*}{\rotatebox[origin=c]{90}{\textbf{Level 2}}}
-& \multirow{4}{*}{BOT}
-& \texttt{unique\_users} $\geq 1000$ & \multirow{4}{5cm}{Malicious automation: bot farms with many fake users, coordinated activity, and suspicious behavioral patterns} \\
-& & \texttt{downloads\_per\_user} $\leq 50$ & \\
-& & \texttt{user\_coordination\_score} $\geq 0.7$ & \\
-& & \texttt{user\_authenticity\_score} $\leq 0.3$ & \\
-\cmidrule{2-4}
-& \multirow{4}{*}{\shortstack[l]{LEGITIMATE\_\\AUTOMATION}}
-& \texttt{downloads\_per\_user} $\geq 500$ & \multirow{4}{5cm}{Benign automation: mirrors, CI/CD pipelines with few users, high per-user activity, and geographic stability} \\
-& & \texttt{unique\_users} $\leq 100$ & \\
-& & \texttt{geographic\_stability} $\geq 0.7$ & \\
-& & \texttt{regularity\_score} $\geq 0.8$ & \\
-\midrule
-\multirow{10}{*}{\rotatebox[origin=c]{90}{\textbf{Level 3}}}
-& individual\_user & \texttt{unique\_users} $\leq 5$, \texttt{DL/user} $\leq 20$ & Single researchers or casual users \\
-\cmidrule{2-4}
-& research\_group & \texttt{users} 5--50, \texttt{working\_hours} $\geq 0.5$ & Small academic teams \\
-\cmidrule{2-4}
-& scraper\_bot & \texttt{users} $\geq 5000$, \texttt{DL/user} $\leq 20$ & High-frequency automated scrapers \\
-\cmidrule{2-4}
-& crawler\_bot & High \texttt{file\_exploration\_score} & Systematic crawlers \\
-\cmidrule{2-4}
-& coordinated\_bot & \texttt{coordination\_score} $\geq 0.8$ & Bot farms with synchronized activity \\
-\cmidrule{2-4}
-& mirror & \texttt{DL/user} $\geq 500$, \texttt{users} $\leq 100$ & Institutional mirrors \\
-\cmidrule{2-4}
-& ci\_cd\_pipeline & \texttt{users} $\leq 10$, \texttt{regularity} $\geq 0.8$ & Automated testing/builds \\
-\cmidrule{2-4}
-& institutional\_hub & \texttt{downloads} $\geq 100$K & Research infrastructure hubs \\
-\cmidrule{2-4}
-& course\_workshop & \texttt{users} 50--500, \texttt{DL/user} 5--30 & Educational events \\
-\bottomrule
-\end{tabular}
-\end{table}
+\includegraphics[width=0.75\textwidth]{figures/figure_pride_visualization.png}
+\caption{PRIDE Archive download statistics integration. Each dataset displays a gradient percentile bar and total download count. A popup trend chart shows yearly download activity, enabling users to assess dataset popularity and reuse trends directly within the PRIDE interface.}
+\label{fig:pride_viz}
+\end{figure}
 
-\subsection{Classification Methods}
+\subsection{Usage Analysis}
 
-LogGhostbuster provides two classification methods:
+All usage analyses were performed on the bot-filtered dataset using DuckDB \citep{Raasveldt2019} for efficient querying. Analyses include: (1) geographic distribution of downloads by country and world region; (2) temporal trends at yearly and monthly resolution; (3) download protocol usage over time; (4) dataset popularity ranking; and (5) download concentration analysis using the Gini coefficient and Lorenz curve.
 
-\subsubsection{Rule-Based Classification}
-
-The rule-based method uses YAML-configurable pattern matching. For each classification level, patterns are defined as conjunctions of feature constraints:
-
-\begin{lstlisting}[language=Python, caption=Example rule pattern]
-behavior_type:
-  automated:
-    patterns:
-      - id: high_regularity
-        regularity_score:
-          min: 0.7
-      - id: many_users_pattern
-        unique_users:
-          min: 1000
-        downloads_per_user:
-          max: 50
-\end{lstlisting}
-
-Patterns are evaluated in order, with the first matching pattern determining classification. This approach provides:
-\begin{itemize}
-    \item Interpretability: Each classification has a clear rule chain
-    \item Configurability: Rules can be adjusted without code changes
-    \item Speed: Pattern matching is computationally efficient
-\end{itemize}
-
-\subsubsection{Deep Architecture Classification}
-
-The deep method augments rule-based classification with temporal pattern learning:
-
-\textbf{Time-series Feature Extraction}: Download patterns are aggregated into fixed-length sequences (default: 12 monthly windows) capturing temporal evolution.
-
-\textbf{Transformer Encoder}: A Transformer architecture processes time-series features:
-\begin{equation}
-    \mathbf{h} = \text{Transformer}(\mathbf{X}_{ts}) \oplus \mathbf{x}_{fixed}
-\end{equation}
-where $\mathbf{X}_{ts} \in \mathbb{R}^{T \times d}$ represents $T$ time windows with $d$ features, and $\mathbf{x}_{fixed}$ are static location features.
-
-\textbf{Multi-task Learning}: The model jointly predicts:
-\begin{itemize}
-    \item User category (bot, hub, independent, normal, other)
-    \item Binary bot indicator (via auxiliary head)
-\end{itemize}
-
-\textbf{Confidence-based Classification}: Predictions with low confidence are flagged for human review:
-\begin{equation}
-    \text{confidence} = 1 - H(p) / \log(K)
-\end{equation}
-where $H(p)$ is the entropy of the softmax distribution and $K$ is the number of classes.
-
-\subsection{Implementation}
-
-LogGhostbuster is implemented in Python 3.8+ with the following key dependencies:
-
-\begin{itemize}
-    \item \textbf{DuckDB}: Memory-efficient Parquet processing with SQL interface
-    \item \textbf{scikit-learn}: Isolation Forest implementation
-    \item \textbf{PyTorch}: Deep learning components (optional)
-    \item \textbf{pandas/numpy}: Data manipulation
-    \item \textbf{matplotlib/seaborn}: Visualization
-\end{itemize}
-
-The system supports:
-\begin{itemize}
-    \item \textbf{Sampling}: RESERVOIR sampling for large datasets
-    \item \textbf{Memory management}: Configurable limits (default 16GB)
-    \item \textbf{Parallel processing}: Multi-core utilization
-    \item \textbf{Provider plugins}: Extensible log format support
-\end{itemize}
-
+% ======================================================================
 \section{Results}
+% ======================================================================
 
-\subsection{Dataset: PRIDE Database Logs}
+\subsection{Global PRIDE Usage Patterns}
 
-We evaluated LogGhostbuster on download logs from the PRIDE proteomics database \citep{Perez-Riverol2022}, one of the world's largest mass spectrometry data repositories. The dataset comprises:
+The PRIDE Archive serves users in 213 countries, demonstrating truly global reach (Figure~\ref{fig:geographic}). The top five countries by download volume are the United States (5.1M downloads, 26.8\%), the United Kingdom (4.5M, 23.6\%), Germany (4.3M, 22.5\%), South Korea (869K, 4.6\%), and Canada (691K, 3.6\%). Europe accounts for the largest share of downloads (55.7\%), followed by the Americas (30.7\%) and Asia (11.4\%).
 
-\begin{itemize}
-    \item \textbf{Total downloads}: 159.3 million
-    \item \textbf{Unique locations}: 71,133 (after geographic aggregation)
-    \item \textbf{Time period}: Multi-year (exact dates anonymized)
-    \item \textbf{Features}: 60+ computed per location
-\end{itemize}
-
-\subsection{Classification Results}
-
-Table~\ref{tab:results_summary} summarizes the hierarchical classification results:
-
-\begin{table}[H]
+\begin{figure}[H]
 \centering
-\caption{Classification results on PRIDE database logs}
-\label{tab:results_summary}
-\begin{tabular}{lrrr}
-\toprule
-\textbf{Classification} & \textbf{Locations} & \textbf{\%} & \textbf{Downloads (\%)} \\
-\midrule
-\multicolumn{4}{l}{\textit{Level 1: Behavior Type}} \\
-\quad ORGANIC & 49,563 & 69.7\% & 913K (0.6\%) \\
-\quad AUTOMATED & 21,570 & 30.3\% & 158.4M (99.4\%) \\
-\midrule
-\multicolumn{4}{l}{\textit{Level 2: Automation Category}} \\
-\quad BOT & 20,903 & 96.9\%$^*$ & 113.1M (71.0\%) \\
-\quad LEGITIMATE\_AUTOMATION & 667 & 3.1\%$^*$ & 45.3M (28.4\%) \\
-\midrule
-\multicolumn{4}{l}{\textit{Level 3: Subcategories}} \\
-\quad individual\_user & 29,303 & 41.2\% & --- \\
-\quad research\_group & 20,311 & 28.5\% & --- \\
-\quad generic\_bot & 12,375 & 17.4\% & --- \\
-\quad scraper\_bot & 8,477 & 11.9\% & --- \\
-\quad mirror & 667 & 0.9\% & --- \\
-\bottomrule
-\multicolumn{4}{l}{\small $^*$Percentage of automated locations}
-\end{tabular}
-\end{table}
+\includegraphics[width=0.85\textwidth]{figures/figure1_geographic_distribution.pdf}
+\caption{Geographic distribution of PRIDE downloads. Top 20 countries by download volume after bot removal (2020--2025).}
+\label{fig:geographic}
+\end{figure}
 
-\subsection{Key Findings}
+To characterize the relationship between user base size and download intensity, we plotted total downloads against unique users for the top 50 countries (Figure~\ref{fig:bubble}A). Two distinct usage patterns emerge. Countries such as the United States (63,944 users, 80 downloads/user), France (10,844 users, 15 downloads/user), and Canada (9,124 users, 76 downloads/user) exhibit broad user bases with moderate per-user download volumes, consistent with diverse individual researchers accessing specific datasets of interest. In contrast, Hong Kong (176 users, 832 downloads/user), Singapore (703 users, 478 downloads/user), South Korea (2,210 users, 393 downloads/user), and the United Kingdom (11,659 users, 386 downloads/user) show higher per-user download intensity, suggesting concentrated institutional access patterns such as systematic data mirroring or large-scale reanalysis efforts. This distinction highlights that aggregate download volume alone does not fully capture the nature of data reuse, and that institutional access patterns vary markedly between countries.
 
-\subsubsection{Bot Traffic Dominance}
+Although European countries account for the majority of PRIDE downloads, yearly trends reveal shifting dynamics (Figure~\ref{fig:bubble}B). Germany showed a pronounced peak in 2023 (2.4M downloads) before declining, while the United Kingdom peaked in 2022 (1.8M) with subsequent moderation. Notably, PRIDE usage is growing in low- and middle-income countries (Figure~\ref{fig:bubble}C). India (55K downloads), Mexico (23K), and Brazil (12K) show emerging download activity, with countries such as Turkey and the Philippines also contributing. This growth suggests that PRIDE is increasingly serving as a resource for researchers in developing nations, supporting broader global participation in proteomics data reuse.
 
-Despite representing only 29.4\% of locations, bot traffic accounts for 71.0\% of total downloads. This dramatic asymmetry highlights the importance of bot detection for accurate usage statistics.
-
-\subsubsection{Download Hub Identification}
-
-The system correctly identified 667 legitimate automation sources responsible for 45.3 million downloads (28.4\%). These include:
-\begin{itemize}
-    \item Institutional mirrors providing regional access
-    \item CI/CD pipelines for bioinformatics software
-    \item Data aggregation services
-\end{itemize}
-
-Distinguishing these from malicious bots prevents incorrect blocking of valuable services.
-
-\subsubsection{Human vs Automated Patterns}
-
-The Level 1 classification reveals a clear separation:
-\begin{itemize}
-    \item \textbf{Organic locations} (69.7\%): Many locations with minimal download activity, typical of individual researchers.
-    \item \textbf{Automated locations} (30.3\%): Fewer locations with massive download volumes.
-\end{itemize}
-
-\subsection{Feature Importance}
-
-Analysis of feature importance reveals the most discriminative features for bot detection (Table~\ref{tab:feature_importance}):
-
-\begin{table}[H]
+\begin{figure}[H]
 \centering
-\caption{Top features for bot classification (correlation with bot label)}
-\label{tab:feature_importance}
-\begin{tabular}{lr}
-\toprule
-\textbf{Feature} & \textbf{Correlation} \\
-\midrule
-unique\_users & 0.45 \\
-downloads\_per\_user & -0.38 \\
-user\_coordination\_score & 0.32 \\
-night\_activity\_ratio & 0.28 \\
-working\_hours\_ratio & -0.25 \\
-regularity\_score & 0.24 \\
-hourly\_entropy & -0.21 \\
-burst\_pattern\_score & 0.19 \\
-\bottomrule
-\end{tabular}
-\end{table}
+\includegraphics[width=0.95\textwidth]{figures/figure7_country_bubble.pdf}
+\caption{Global country-level download patterns. (A) Total downloads versus unique users for the top 50 countries by download volume; bubble size and color represent downloads per user on a log scale, revealing broad individual access (lower right) versus concentrated institutional access (upper left). (B) Yearly download trends for the top 15 European countries showing shifting dominance. (C) Yearly download trends for low- and middle-income countries, demonstrating accelerating adoption since 2024.}
+\label{fig:bubble}
+\end{figure}
 
-The inverse relationship between \texttt{unique\_users} and \texttt{downloads\_per\_user} is the strongest signal: bots typically show many users with low individual activity (cycling fake accounts), while mirrors show few users with very high activity.
+\subsection{Temporal Trends}
 
-\subsection{Performance Characteristics}
+Download activity has grown substantially over the study period (Figure~\ref{fig:temporal}). Annual downloads increased from 1.2 million in 2021 to 3.5 million in 2022, peaking at 5.8 million in 2025. The number of unique datasets accessed per year grew from 14,879 in 2021 to 18,621 in 2024, reflecting both the growing PRIDE collection and increasing data reuse.
 
-\begin{table}[H]
+\begin{figure}[H]
 \centering
-\caption{Computational performance}
-\label{tab:performance}
-\begin{tabular}{lcc}
-\toprule
-\textbf{Component} & \textbf{Rules Method} & \textbf{Deep Method} \\
-\midrule
-Feature extraction & 3.2 min & 3.2 min \\
-Anomaly detection & 0.5 min & 0.5 min \\
-Classification & 0.3 min & 15.8 min \\
-Report generation & 0.8 min & 0.8 min \\
-\midrule
-\textbf{Total} & \textbf{4.8 min} & \textbf{20.3 min} \\
-\bottomrule
-\multicolumn{3}{l}{\small Tested on 71K locations, 16GB RAM, 8-core CPU}
-\end{tabular}
-\end{table}
+\includegraphics[width=\textwidth]{figures/figure2_temporal_trends.pdf}
+\caption{Temporal trends in PRIDE usage. (A) Annual download volume in millions. (B) Growth in unique datasets accessed and unique locations per year.}
+\label{fig:temporal}
+\end{figure}
 
+\subsection{Protocol Usage}
+
+Download protocol preferences have shifted over the study period (Figure~\ref{fig:protocols}A). FTP was the dominant protocol in 2021, accounting for 65\% of genuine downloads. HTTP overtook FTP in 2022 (54\%), but FTP surged again in 2023 (79\%), likely driven by institutional hub traffic that relies on FTP for bulk transfers. By 2025, HTTP re-emerged as the leading protocol (69\%), reflecting broader adoption of web-based download tools. Despite superior transfer performance for large files, advanced protocols such as Aspera and Globus remain in early adoption stages, accounting for 3.3\% and 1.0\% of 2025 downloads respectively. To lower adoption barriers, we released \texttt{pridepy} \citep{Kamatchinathan2025} in March 2025, a Python-based command-line tool that abstracts protocol complexity and enables seamless switching between FTP, Aspera, and Globus transfers with a single command. A monthly breakdown of 2025 downloads (Figure~\ref{fig:protocols}B) shows emerging Aspera usage alongside sustained Globus adoption, indicating that providing user-friendly tooling can facilitate the transition to high-performance transfer protocols in scientific data repositories.
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.85\textwidth]{figures/figure4_protocol_usage.pdf}
+\caption{Download protocol usage. (A) Annual download volume by protocol (2021--2025), showing the alternation between FTP and HTTP dominance. (B) Monthly breakdown of 2025 showing protocol usage patterns.}
+\label{fig:protocols}
+\end{figure}
+
+\subsection{Download Concentration}
+
+Dataset reuse follows a highly skewed distribution characteristic of heavy-tailed systems (Figure~\ref{fig:concentration}A). The Gini coefficient of 0.84 indicates substantial inequality: the top 1\% of datasets (341 datasets) account for 43.3\% of all downloads, the top 10\% account for 77.2\%, and the bottom 50\% of datasets collectively represent only 3.1\% of downloads. The median dataset has received 85 downloads, while the most popular exceeds 355,000. The rank-frequency distribution reveals a characteristic long tail, with download counts dropping steeply beyond the top 1\% of datasets.
+
+Importantly, the most downloaded datasets are not one-time events but show sustained reuse over multiple years (Figure~\ref{fig:concentration}B). Of the top 25 datasets, most have been actively downloaded in at least 4 of the 5 years covered (2021--2025), and PXD000001---the first dataset deposited in PRIDE---has been downloaded every year. Several datasets exhibit pronounced temporal spikes (e.g., PXD021013 with 303K downloads, PXD029360 with 148K), likely reflecting their use as benchmarks in specific studies or community challenges. Others maintain steady download rates across years (e.g., PXD004732, PXD000561), suggesting their role as long-term reference datasets for the proteomics community. A ranking of the top 20 most downloaded datasets and extended analyses are provided in Supplementary Notes Section~S8.
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=\textwidth]{figures/figure5_dataset_concentration.pdf}
+\caption{Dataset reuse concentration and consistency. (A) Rank-frequency distribution on log-log scale; the dashed red line marks the top 1\% boundary, beyond which download counts drop sharply (Gini = 0.84). (B) Download consistency heatmap for the top 25 most downloaded datasets (2021--2025, after bot removal); color intensity represents download count on a log$_{10}$ scale. Most top datasets show sustained reuse across 4--5 years, indicating their role as community reference and benchmark datasets.}
+\label{fig:concentration}
+\end{figure}
+
+\subsection{Download Hubs}
+
+Our classification identified 664 download hubs distributed across 58 countries (Figure~\ref{fig:hubs}), accounting for 18.0 million downloads. These hubs represent institutions that systematically and continuously reanalyze public proteomics data \citep{PerezRiverol2022reanalysis}, including institutional mirrors, research infrastructure nodes, and data aggregation services. The United States hosts the most hubs (155), followed by Germany (99), Japan (46), and the Netherlands (38), with total hub download volume led by the United States (4.7M), the United Kingdom (4.5M), and Germany (4.2M). The geographic spread of hubs---spanning all continents---demonstrates that systematic data reuse is not confined to a few centers but is a global phenomenon. Hub characteristics vary widely: some operate with very few users but extremely high per-user download rates (e.g., Dresden with 275K downloads/user from 8 users, consistent with a mirror), while others involve hundreds of users accessing data at moderate intensity (e.g., Hefei with 1,645 users).
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=\textwidth]{figures/figure_hub_distribution.pdf}
+\caption{Distribution and characteristics of 664 identified download hubs. (A) Geographic locations, with bubble size proportional to download volume. (B) Top 15 countries by number of hubs, annotated with total hub download volume. (C) Hub diversity: unique users versus total downloads on log-log scale, showing the range from single-user mirrors to multi-user reanalysis infrastructure.}
+\label{fig:hubs}
+\end{figure}
+
+\subsection{File Type Download Patterns}
+
+More than 81\% of all downloads originate from five countries, and developing countries are largely absent from the top 10. Analysis of file type download patterns across regions reveals distinct usage profiles (Figure~\ref{fig:filetype}): East Asian and North American users download predominantly raw instrument files (72--73\%), while LMIC countries show a slightly lower raw file proportion (54\%) with a corresponding increase in result files and processed spectra \citep{PerezRiverol2022reanalysis}.
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=\textwidth]{figures/figure_filetype_by_region.pdf}
+\caption{File type download patterns by region (after bot removal). (A) Percentage of downloads by file type category across four regions. LMIC countries show lower raw file usage and higher result/processed spectra downloads compared to East Asia and North America. (B) Aggregated view: raw + processed spectra (full reanalysis capability) versus results + metadata (lightweight reuse). LMIC countries have the lowest reanalysis-oriented profile (55\%) and the highest lightweight reuse proportion (15\%).}
+\label{fig:filetype}
+\end{figure}
+
+% ======================================================================
 \section{Discussion}
+% ======================================================================
 
-\subsection{Strengths}
+\begin{sloppypar}
+The finding that 88.0\% of PRIDE download traffic is automated is striking, considerably exceeding the 30--50\% bot share reported for general internet traffic \citep{Imperva2023}. Scientific data repositories are disproportionately targeted because they offer unauthenticated, persistent, and predictable access to valuable content---making bot detection a prerequisite for any meaningful usage analysis. Without filtering, the most ``popular'' datasets may simply be the most bot-targeted, rendering raw download counts unreliable as impact indicators. This is consequential because download statistics are increasingly used by funding agencies, institutions, and researchers as evidence of data impact alongside traditional citation metrics \citep{PerezRiverol2019}. Our framework demonstrates that combining anomaly detection with behavioral classification can recover genuine usage signals; however, as AI-driven platforms that perform large-scale automated reanalysis become more prevalent, the boundary between harmful scraping and beneficial programmatic access will become increasingly blurred, and repositories will need adaptive classification schemes that evolve alongside legitimate automation patterns.
 
-\textbf{Hybrid approach}: Combining unsupervised anomaly detection with supervised/rule-based classification provides robustness. Isolation Forest captures unusual patterns without labeled training data, while the classification layer provides interpretable categories.
+PRIDE downloads have grown from 1.2 million in 2021 to 5.8 million in 2025, confirming accelerating data reuse across a geographically broad user base (213 countries). Download intensity varies markedly: some countries exhibit broad individual user bases (e.g., United States with 64K users), while others show concentrated institutional access (e.g., Hong Kong with 832 downloads/user, Singapore with 478 downloads/user), suggesting that the nature of reuse---individual exploration versus systematic reanalysis---differs between research communities. The 664 download hubs we identified reveal a global infrastructure of institutional data consumers, from single-user mirrors performing full-repository synchronization to multi-user reanalysis centers processing hundreds of datasets. This hub distribution provides an empirical map of where proteomics bioinformatics infrastructure exists and can inform ProteomeXchange decisions about mirror placement, edge caching, and regional resource allocation---for instance, countries with growing user bases but no local hubs (e.g., India, Brazil, Mexico) may benefit from targeted infrastructure support. FTP and HTTP have alternated as the dominant protocol, with the shift to HTTP dominance in 2025 (69\%) reflecting both broader individual adoption and the growing importance of API-based programmatic access; advanced protocols (Aspera, Globus) remain in early stages (1.4\% of genuine traffic), but tools such as \texttt{pridepy} \citep{Kamatchinathan2025} should lower adoption barriers as datasets continue to grow in size.
 
-\textbf{Hierarchical taxonomy}: The three-level classification provides both high-level insights (organic vs automated) and actionable detail (specific subcategories). This supports different use cases from quick triage to detailed investigation.
+Dataset reuse is highly concentrated (Gini = 0.84), with the top 1\% of datasets accounting for 43.3\% of all downloads. While benchmark datasets such as PXD000001 show sustained multi-year reuse, the ``long tail'' of rarely downloaded datasets should not be disregarded: these datasets may gain future value through meta-analyses, machine learning applications, or integration into multi-omics studies. Repositories can better serve both ends of this distribution by investing in improved discoverability---richer metadata, curated tags, and recommendation systems---alongside prioritized access for high-demand datasets. Regional differences in file type usage, with LMIC countries showing higher reliance on processed results rather than raw files, suggest that computational capacity and bandwidth constraints shape reuse patterns. Several ongoing efforts address this: \texttt{quantms} \citep{Dai2024} generates standardized reanalysis outputs from public datasets, the PTMExchange initiative (\url{https://www.proteomexchange.org/ptmexchange}) provides curated post-translational modification results, and the PRIDE team is collaborating with developers of widely used search engines---including DIA-NN \citep{Demichev2020}, MaxQuant \citep{Cox2008}, and MSFragger \citep{Kong2017}---to define standardized submission guidelines that ensure result files, quantification tables, and metadata are structured for immediate reuse. More broadly, the \texttt{nf-downloadstats} pipeline and DeepLogBot framework are applicable to any open data repository facing similar challenges, including genomics (ENA/SRA), structural biology (PDB), and metabolomics (MetaboLights) resources.
+\end{sloppypar}
 
-\textbf{Provider agnosticism}: The schema mapping and extensible feature extraction support different log formats without code changes. This enables deployment across diverse repositories.
-
-\textbf{Configurability}: YAML-based rule configuration allows domain experts to tune thresholds without programming knowledge, adapting to evolving bot patterns.
-
-\subsection{Limitations}
-
-\textbf{Ground truth uncertainty}: Without definitive labels, evaluation relies on pattern consistency and expert review. Some edge cases may be misclassified.
-
-\textbf{Temporal lag}: The system analyzes historical data and may not detect new bot campaigns in real-time. Integration with streaming analysis would address this.
-
-\textbf{Feature engineering dependency}: Performance depends on the quality of engineered features. Novel bot behaviors not captured by current features may evade detection.
-
-\textbf{Computational cost}: The deep method significantly increases processing time. For very large datasets or real-time needs, the rules method may be preferable.
-
+% ======================================================================
 \section{Conclusion}
+% ======================================================================
 
-LogGhostbuster provides an effective solution for bot detection in scientific repository logs. By combining Isolation Forest anomaly detection with hierarchical classification, the system accurately distinguishes malicious bots from legitimate automation while maintaining interpretability.
+We present the PRIDE Archive download tracking infrastructure and the first comprehensive analysis of download patterns from the PRIDE proteomics archive, covering 159 million records over five years. The infrastructure comprises \texttt{nf-downloadstats}, a scalable Nextflow pipeline for processing large-scale download logs, and DeepLogBot, a bot detection framework with two complementary algorithms achieving up to 0.775 macro F1. After removing 88.0\% of traffic identified as automated, we obtain reliable usage metrics for 19.1 million genuine downloads spanning 34,085 datasets.
 
-Applied to the PRIDE database, LogGhostbuster identified that 71\% of downloads originated from automated bot traffic, while correctly preserving 667 legitimate automation sources. This finding has significant implications for download statistics reporting and resource allocation in scientific repositories.
+Our analysis reveals a globally distributed user base led by the United States, the United Kingdom, and Germany, a transition from FTP to HTTP-based access with emerging adoption of high-throughput protocols (Aspera, Globus), and a highly concentrated dataset reuse distribution. On average, any PRIDE dataset file has been downloaded at least 30 times from 2021 to 2025, and more than 96\% of the datasets in PRIDE have been downloaded at least once. These findings provide evidence for the growing impact of open proteomics data and offer actionable insights for repository infrastructure planning. Tools such as \texttt{pridepy} \citep{Kamatchinathan2025} for simplified protocol-agnostic downloads and \texttt{quantms} \citep{Dai2024} for public dataset reanalysis complement this infrastructure to facilitate broader data reuse. The \texttt{nf-downloadstats} pipeline and DeepLogBot framework are freely available to enable similar analyses for other scientific repositories.
 
-The open-source release enables other repositories to benefit from bot detection, improving the accuracy of scientific usage metrics across the research data ecosystem.
+\section*{Data and Code Availability}
+
+\begin{sloppypar}
+The \texttt{nf-downloadstats} pipeline is available at \url{https://github.com/PRIDE-Archive/nf-downloadstats} and the DeepLogBot software at \url{https://github.com/ypriverol/deeplogbot}, both under the Apache 2.0 license. Download log data is available upon request from the PRIDE team.
+\end{sloppypar}
 
 \section*{Funding}
 
@@ -549,9 +237,13 @@ This work was supported by EMBL core funding.
 
 \section*{Acknowledgements}
 
-We thank the PRIDE team for providing access to download logs and feedback on classification results.
+S.H. implemented the nextflow workflow; and the collected the data; J.B implemented web interface for the downloads components; C.B, S.K. implemented the integration of the statistics components in the backend of PRIDE and databases; D.J.K, N.S.J. contributed to review the manuscript; the data generated and curate some of the datasets; M.R.D. generated the infrastructure for logs anonimization and provided the logs files to PRIDE team, J.A.V. review the manuscript, Y.P-R design the study; developed the bot detection framework; performed the analysis and wrote the manuscript. We thank the PRIDE team for their support and feedback on the development of the download tracking infrastructure and analysis. We also wants to thanks professor Bernard Kuster for the original discussion about this topic in 2024 during the 2024 HUPO conference in Dresden
 
-\bibliographystyle{plainnat}
+\section*{Conflict of Interest}
+
+The authors declare no conflict of interest.
+
+\bibliographystyle{unsrtnat}
 \bibliography{references}
 
 \end{document}

@@ -227,15 +227,11 @@ class ReportGenerator:
     
     def _write_hub_locations(self, f, hub_locs: pd.DataFrame, city_field: str = 'city'):
         """Write hub locations section."""
-        # Group nearby hub locations (with option to skip LLM for speed)
+        # Group nearby hub locations by geographic proximity
         logger.info("Grouping nearby hub locations for consolidated view...")
-        use_llm_grouping = os.getenv('USE_LLM_GROUPING', 'true').lower() == 'true'
-        if not use_llm_grouping:
-            logger.info("  LLM grouping disabled (set USE_LLM_GROUPING=true to enable)")
         location_groups = group_nearby_locations_with_llm(
-            hub_locs.copy(), 
-            max_distance_km=10, 
-            use_llm=use_llm_grouping
+            hub_locs.copy(),
+            max_distance_km=10,
         )
         
         # Create consolidated hub view

@@ -1,5 +1,5 @@
 # =============================================================================
-# BASE TAXONOMY - LogGhostbuster Hierarchical Classification
+# BASE TAXONOMY - DeepLogBot Hierarchical Classification
 # =============================================================================
 # This file defines the base taxonomy structure for classifying download behavior.
 # Providers can extend or override these definitions in their own config.yaml.
